@@ -88,7 +88,8 @@ void setup() {
     Serial.printf("Cable: %.3f m physical  VF=%.3f  → %.4f m electrical\n\n",
         CABLE_PHYS_M, CABLE_VF, CABLE_ELEC_M);
 
-    int state = radio.begin(CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, 5, RADIOLIB_SX128X_SW_DEFAULT, CAL_TX_DBM);
+    // 0x12 = standard LoRa private-network sync word (RadioLib default for SX128x)
+    int state = radio.begin(CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, 5, 0x12, CAL_TX_DBM);
     if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("[FATAL] radio.begin() failed: %d\n", state);
         Serial.println("Check: SPI wiring, NSS/BUSY/RST pins, power.");
@@ -96,8 +97,8 @@ void setup() {
     }
     Serial.println("Radio OK");
 
-    // Zero out calibration so we measure raw hardware delays
-    radio.setRangingCalibration(0);
+    // RxTxDelay register resets to 0x0000 on power-up — no zeroing needed.
+    // Do not call setRangingCalibration() before this measurement run.
     radio.setDio1Action(onDio1);
 
 #ifdef CAL_MASTER
