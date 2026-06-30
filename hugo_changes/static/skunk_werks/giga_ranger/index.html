@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Giga Ranger — 60 km SX1280 Ranging Link</title>
+<link rel="icon" href="/favicon.png">
+<meta property="og:type"        content="website">
+<meta property="og:site_name"   content="Goose">
+<meta property="og:title"       content="Giga Ranger — 60 km SX1280 Ranging Link">
+<meta property="og:description" content="2.4 GHz SX1280 time-of-flight ranging link between two fixed sites, ~60 km with 18 dB margin.">
+<meta property="og:url"         content="https://rooster.ninja/skunk_werks/giga_ranger/">
+<meta property="og:image"       content="https://rooster.ninja/goose_preview.jpg">
+<meta property="og:image:width" content="1209">
+<meta property="og:image:height" content="500">
+<meta name="twitter:card"       content="summary_large_image">
+<meta name="twitter:image"      content="https://rooster.ninja/goose_preview.jpg">
+<meta name="twitter:title"      content="Giga Ranger — 60 km SX1280 Ranging Link">
+<style>
+  :root {
+    --bg:       #0d0f12;
+    --surface:  #151820;
+    --border:   #252a35;
+    --accent:   #4fa3e0;
+    --accent2:  #7ed6a0;
+    --text:     #d8dce8;
+    --muted:    #6b7280;
+    --heading:  #f0f4ff;
+    --warn:     #f5a623;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+    line-height: 1.65;
+  }
+
+  /* ── Header ── */
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 3rem 1.5rem 2.5rem;
+    text-align: center;
+  }
+
+  header .tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    padding: 0.2em 0.7em;
+    margin-bottom: 1.1rem;
+  }
+
+  header h1 {
+    font-size: clamp(2rem, 6vw, 3.2rem);
+    font-weight: 700;
+    color: var(--heading);
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    margin-bottom: 0.9rem;
+  }
+
+  header .subtitle {
+    font-size: 1.05rem;
+    color: var(--muted);
+    max-width: 560px;
+    margin: 0 auto;
+  }
+
+  /* ── Layout ── */
+  main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 1.25rem 4rem;
+  }
+
+  section {
+    margin-top: 3.5rem;
+  }
+
+  h2 {
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--heading);
+    letter-spacing: -0.01em;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--accent);
+    margin: 1.5rem 0 0.5rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.82rem;
+  }
+
+  p { margin-bottom: 0.9rem; }
+  p:last-child { margin-bottom: 0; }
+
+  /* ── Stat strip ── */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-top: 2rem;
+  }
+
+  .stat {
+    background: var(--surface);
+    padding: 1.2rem 1rem;
+    text-align: center;
+  }
+
+  .stat .value {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--accent2);
+    line-height: 1;
+  }
+
+  .stat .label {
+    font-size: 0.75rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 0.35rem;
+  }
+
+  /* ── Hardware cards ── */
+  .hw-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.25rem;
+    margin-top: 1.5rem;
+  }
+
+  .hw-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .hw-card img {
+    width: 100%;
+    height: 220px;
+    object-fit: cover;
+    display: block;
+    background: #1a1d24;
+  }
+
+  .hw-card .hw-body {
+    padding: 1.1rem 1.2rem;
+  }
+
+  .hw-card .hw-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--heading);
+    margin-bottom: 0.4rem;
+  }
+
+  .hw-card .hw-desc {
+    font-size: 0.87rem;
+    color: var(--muted);
+    line-height: 1.55;
+  }
+
+  .hw-card .hw-badge {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.18em 0.55em;
+    border-radius: 3px;
+    margin-bottom: 0.55rem;
+  }
+
+  .badge-mcu   { background: #1a2e44; color: var(--accent); border: 1px solid #2a4a6a; }
+  .badge-rf    { background: #1a2e1a; color: var(--accent2); border: 1px solid #2a4a2a; }
+  .badge-env   { background: #2e2010; color: var(--warn); border: 1px solid #4a3010; }
+
+  /* ── VNA image pair ── */
+  .vna-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 1.25rem;
+  }
+
+  .vna-grid figure {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .vna-grid img {
+    width: 100%;
+    display: block;
+  }
+
+  .vna-grid figcaption {
+    padding: 0.6rem 0.9rem;
+    font-size: 0.78rem;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  /* ── Pinout image ── */
+  .pinout-wrap {
+    margin-top: 1.25rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .pinout-wrap img {
+    width: 100%;
+    display: block;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+
+  /* ── Spec table ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    margin-top: 1.25rem;
+  }
+
+  th {
+    text-align: left;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    padding: 0.5rem 0.9rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  td {
+    padding: 0.65rem 0.9rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  td:first-child {
+    color: var(--accent);
+    font-weight: 500;
+    white-space: nowrap;
+    width: 35%;
+  }
+
+  tbody tr:hover td { background: var(--surface); }
+
+  /* ── Note box ── */
+  .note {
+    background: #1a2033;
+    border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+    padding: 0.9rem 1.1rem;
+    font-size: 0.88rem;
+    margin-top: 1.25rem;
+  }
+
+  .note strong { color: var(--accent); }
+
+  /* ── Link budget block ── */
+  .budget {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem 1.4rem;
+    margin-top: 1.25rem;
+    font-size: 0.9rem;
+  }
+
+  .budget .budget-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.3rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .budget .budget-row:last-child { border-bottom: none; }
+
+  .budget .budget-row .k { color: var(--muted); }
+  .budget .budget-row .v { color: var(--text); font-weight: 500; }
+  .budget .budget-row .v.pos { color: var(--accent2); }
+  .budget .budget-row .v.neg { color: #e07070; }
+  .budget .budget-row .v.margin { color: var(--warn); font-weight: 700; font-size: 1rem; }
+
+  /* ── Footer ── */
+  footer {
+    text-align: center;
+    padding: 2rem 1rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 540px) {
+    .vna-grid { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    td:first-child { width: auto; white-space: normal; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="tag">Project Overview</div>
+  <h1>Giga Ranger</h1>
+  <p class="subtitle">2.4 GHz SX1280 time-of-flight ranging link — fixed-site, clear line of sight, ~60 km target distance</p>
+</header>
+
+<main>
+
+  <!-- Key numbers -->
+  <div class="stats">
+    <div class="stat"><div class="value">60 km</div><div class="label">Target link distance</div></div>
+    <div class="stat"><div class="value">18 dB</div><div class="label">Link margin</div></div>
+    <div class="stat"><div class="value">13 dBi</div><div class="label">Antenna gain (×2)</div></div>
+    <div class="stat"><div class="value">1625 kHz</div><div class="label">Bandwidth</div></div>
+    <div class="stat"><div class="value">SF9–10</div><div class="label">Spreading factor</div></div>
+    <div class="stat"><div class="value">~15 m</div><div class="label">Atmo. delay (corrected)</div></div>
+  </div>
+
+  <!-- Overview -->
+  <section>
+    <h2>What It Does</h2>
+    <p>
+      Two SX1280 radio nodes measure the straight-line distance between them via round-trip
+      time-of-flight ranging. One node acts as the <strong>initiator</strong> — it sends
+      ranging requests and computes the distance result. The other is the <strong>responder</strong>,
+      which the SX1280's hardware ranging engine handles automatically with no firmware timing
+      involvement. Both sites are fixed; one sits on a mountaintop for unobstructed line of sight
+      to the other.
+    </p>
+    <p>
+      Calibration will be done at known distance and confirmed via a variety of local
+      landmarks and externally measured points; methodology still to be determined. GPS
+      co-ordinates will not be used in any way for distance, as the attempt is to obtain
+      projection-agnostic distance based on physical principles rather than lights in the sky.
+    </p>
+
+    <div class="note">
+      <strong>Key design choice:</strong> The SX1280 must be the <em>non-PA</em> version.
+      External power amplifiers break the chip's fast internal RF-switch turnaround that
+      the ranging engine depends on. High-gain directional antennas provide the link budget
+      instead — field-proven to 40 km on a non-PA module with 2 dBi whips at 4 dBm.
+    </div>
+  </section>
+
+  <!-- Hardware -->
+  <section>
+    <h2>Hardware (per site — two identical builds)</h2>
+
+    <div class="hw-grid">
+
+      <div class="hw-card">
+        <img src="assets/t3s3-pinout.png" alt="LILYGO T3-S3 V1.2 pinout diagram">
+        <div class="hw-body">
+          <div class="hw-badge badge-mcu">MCU + Radio</div>
+          <div class="hw-title">LILYGO T3-S3 (SX1280, without PA)</div>
+          <div class="hw-desc">
+            ESP32-S3 and SX1280 integrated on a single board with SMA connector and
+            onboard RF switching. The "without PA" variant is required — internal switching
+            is what enables the ranging engine. Includes onboard LiPo charger, OLED header,
+            and USB-C. Rust and Arduino/C++ compatible.
+          </div>
+        </div>
+      </div>
+
+      <div class="hw-card">
+        <img src="assets/yagi-antenna.png" alt="2.4 GHz 9-unit Yagi antenna">
+        <div class="hw-body">
+          <div class="hw-badge badge-rf">Antenna</div>
+          <div class="hw-title">2.4 GHz Yagi — 13 dBi, SMA-female</div>
+          <div class="hw-desc">
+            9-element Yagi covering 2.40–2.48 GHz. SMA-female connector mates directly
+            to the T3-S3 board jack — no adapter, no pigtail, no added loss. VNA-verified
+            match: SWR ≈ 1.11 at 2.45 GHz. Beamwidth E = 48° / H = 75°, realized gain
+            ~11 dBi. Both ends must share the same polarization (element orientation).
+          </div>
+        </div>
+      </div>
+
+      <div class="hw-card">
+        <img src="assets/bme280.png" alt="BME280 weather sensor in waterproof enclosure">
+        <div class="hw-body">
+          <div class="hw-badge badge-env">Sensor</div>
+          <div class="hw-title">BME280 — Pressure / Temperature / Humidity</div>
+          <div class="hw-desc">
+            Feeds the tropospheric delay-correction model (GRIN). Must be BME280 —
+            not BMP280, which lacks the humidity channel needed for the full atmospheric
+            model. Shown here in a weatherproof IP65 enclosure suitable for outdoor
+            mounting at the radio site.
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- VNA measurements -->
+  <section>
+    <h2>Antenna — VNA Measurements</h2>
+    <p>
+      Both traces centered at 2.450 GHz, 1.600 GHz span. The antenna is well-matched
+      across the full 2.40–2.49 GHz ISM band.
+    </p>
+
+    <div class="vna-grid">
+      <figure>
+        <img src="assets/vna-swr.png" alt="VNA SWR plot — minimum at 2.450 GHz, SWR 1.113">
+        <figcaption>SWR — minimum 1.113 @ 2.450 GHz</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/vna-return-loss.png" alt="VNA S11 return loss — −25.59 dB at 2.450 GHz">
+        <figcaption>Return loss (S11) — −25.59 dB @ 2.450 GHz</figcaption>
+      </figure>
+    </div>
+
+    <div class="note">
+      −25.6 dB return loss means less than 0.3% of transmit power is reflected.
+      Across the 88 MHz span from the lower to upper marker the SWR stays well below 1.5,
+      covering the entire 2.4 GHz ISM band with margin.
+    </div>
+  </section>
+
+  <!-- Radio config -->
+  <section>
+    <h2>Radio Configuration</h2>
+    <table>
+      <thead>
+        <tr><th>Parameter</th><th>Value</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Chip</td><td>Semtech SX1280 (2.4 GHz LoRa ranging)</td></tr>
+        <tr><td>Frequency</td><td>2450 MHz (2.4 GHz ISM band)</td></tr>
+        <tr><td>Bandwidth</td><td>1625 kHz — widest available, best distance resolution</td></tr>
+        <tr><td>Spreading factor</td><td>SF9–SF10 (link margin is plentiful)</td></tr>
+        <tr><td>Output power</td><td>13 dBm (SX1280 chip maximum)</td></tr>
+        <tr><td>Roles</td><td>One initiator, one responder — identical RF parameters required</td></tr>
+        <tr><td>Calibration</td><td>Known GPS site coordinates → computed great-circle distance as reference</td></tr>
+        <tr><td>Atmospheric model</td><td>GRIN tropospheric delay from BME280 P/T/RH readings</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Link budget -->
+  <section>
+    <h2>Link Budget — 60 km</h2>
+
+    <div class="budget">
+      <div class="budget-row"><span class="k">TX power (chip max)</span><span class="v pos">+13 dBm</span></div>
+      <div class="budget-row"><span class="k">TX antenna gain</span><span class="v pos">+11 dBi</span></div>
+      <div class="budget-row"><span class="k">RX antenna gain</span><span class="v pos">+11 dBi</span></div>
+      <div class="budget-row"><span class="k">Free-space path loss (60 km @ 2.45 GHz)</span><span class="v neg">−136 dB</span></div>
+      <div class="budget-row"><span class="k">Miscellaneous losses</span><span class="v neg">−4 dB</span></div>
+      <div class="budget-row"><span class="k">Estimated received signal</span><span class="v">−105 dBm</span></div>
+      <div class="budget-row"><span class="k">SX1280 ranging sensitivity</span><span class="v">~−124 dBm</span></div>
+      <div class="budget-row"><span class="k">Link margin</span><span class="v margin">≈ +18 dB</span></div>
+    </div>
+
+    <div class="note">
+      Power is not the constraint at 60 km — the radio horizon (antenna height above
+      terrain + Earth curvature) is. A mountaintop site eliminates this limit.
+      Field tests of non-PA SX1280 nodes have confirmed valid ranging at 40 km on
+      omni 2 dBi whips at 4 dBm.
+    </div>
+  </section>
+
+  <!-- Power -->
+  <section>
+    <h2>Power — 12 V Battery to 5 V (Field / Solar Site)</h2>
+    <p>
+      The T3-S3 runs from 5 V (USB / 5 V input) and regulates to 3.3 V on-board.
+      At a solar or battery site the source is 12 VDC, requiring a DC-DC conversion stage.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Approach</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>RECOM R-78E5.0-1.0 <em>(recommended)</em></td>
+          <td>Drop-in sealed switching module, high efficiency, low noise, 1 A. One part, no tuning.</td>
+        </tr>
+        <tr>
+          <td>Quality buck (e.g. Pololu D24V10F5)</td>
+          <td>Pre-filtered, cleaner than bare MP1584 boards. Add output decoupling caps.</td>
+        </tr>
+        <tr>
+          <td>Buck → LDO two-stage</td>
+          <td>Buck does the efficient heavy lifting; LDO scrubs switching ripple. Cleanest rail.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p style="margin-top:1rem;">
+      Whichever converter: add 100 µF electrolytic ∥ 0.1 µF ceramic at both input and output.
+      The T3-S3's onboard LiPo charger provides a free UPS — a small LiPo trickle-charges
+      from the regulated 5 V rail and carries the node through cloudy spells or brief battery dips.
+    </p>
+  </section>
+
+  <!-- Install notes -->
+  <section>
+    <h2>Installation Notes</h2>
+    <table>
+      <thead>
+        <tr><th>Topic</th><th>Detail</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Polarization</td>
+          <td>Both Yagis must share the same element orientation (both vertical or both horizontal). A 90° mismatch costs ~20 dB.</td>
+        </tr>
+        <tr>
+          <td>Aiming</td>
+          <td>E-plane beamwidth is 48° — ±24° within 3 dB. Pre-aim by GPS great-circle bearing, correcting ~14–15° E magnetic declination in eastern BC. Fine-peak on live RSSI readout.</td>
+        </tr>
+        <tr>
+          <td>Fresnel clearance</td>
+          <td>Verify path profile clears terrain at the midpoint with room for the ~40 m first Fresnel zone plus ~50 m Earth bulge over 60 km. Run HeyWhatsThat or RadioMobile before deploying.</td>
+        </tr>
+        <tr>
+          <td>Enclosure</td>
+          <td>IP65 plastic (RF-transparent) box. Weatherproof the SMA joint. Add surge arrestor and ground strap if mounting on a metal mast at height.</td>
+        </tr>
+        <tr>
+          <td>Diagnostics</td>
+          <td>Low RSSI despite good aim → rotate one antenna 90° (polarization check). Still low → verify Fresnel / Earth bulge clearance before adjusting RF settings.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+</main>
+
+<footer>
+  Giga Ranger &mdash; rooster.ninja
+</footer>
+
+</body>
+</html>

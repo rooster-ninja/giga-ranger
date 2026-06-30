@@ -1,0 +1,128 @@
+//! Tropospheric (GRIN) excess-delay model for an SX1280 time-of-flight ranging link.
+//!
+//! The lower atmosphere is a gradient-index medium: refractive index falls with
+//! height as air density drops. That makes the radio signal travel slightly slower
+//! than c, adding excess electrical path length that the SX1280 reports as extra
+//! distance. This module projects that excess so you can subtract it.
+//!
+//! Dominant term  = refractivity slowing:  dL = 1e-6 * integral( N(h) ds )
+//! Omitted term   = ray bending (curved path is longer): ~cm over 60 km, negligible.
+//!
+//! no_std note: replace the `.exp()` calls with `libm::exp` if building without std.
+
+const C_VAC: f64 = 299_792_458.0; // speed of light in vacuum, m/s
+const RE: f64 = 6_371_000.0;      // mean Earth radius, m
+
+/// Saturation water-vapour pressure over water [hPa], Buck (1981). `t_c` in degC.
+fn sat_vapour_pressure(t_c: f64) -> f64 {
+    6.1121 * ((17.502 * t_c) / (t_c + 240.97)).exp()
+}
+
+/// Surface refractivity split into dry and wet parts (ITU-R P.453).
+/// `p_hpa` total pressure [hPa], `t_k` temperature [K], `rh` relative humidity [0..1].
+/// Returns (N_dry0, N_wet0) in N-units at the sensor's altitude.
+fn surface_refractivity(p_hpa: f64, t_k: f64, rh: f64) -> (f64, f64) {
+    let t_c = t_k - 273.15;
+    let e = rh * sat_vapour_pressure(t_c);      // vapour partial pressure [hPa]
+    let n_dry = 77.6 * p_hpa / t_k;
+    let n_wet = 3.73e5 * e / (t_k * t_k);
+    (n_dry, n_wet)
+}
+
+/// Refractivity N at mean-sea-level height `h_msl` [m], two-component exponential
+/// decay referenced to the sensor altitude `h_ref_msl`. Scale heights are typical
+/// lower-troposphere values and are tunable; swap in a radiosonde/NWP profile here
+/// for best accuracy.
+fn refractivity_at(h_msl: f64, h_ref_msl: f64, n_dry0: f64, n_wet0: f64) -> f64 {
+    const H_DRY: f64 = 8_000.0; // dry scale height [m]
+    const H_WET: f64 = 2_000.0; // wet scale height [m]
+    let dh = h_msl - h_ref_msl;
+    n_dry0 * (-dh / H_DRY).exp() + n_wet0 * (-dh / H_WET).exp()
+}
+
+/// Output of the excess-delay computation (all one-way).
+#[derive(Clone, Copy, Debug)]
+pub struct ExcessDelay {
+    pub excess_path_m: f64, // extra electrical length == range bias to subtract [m]
+    pub delay_ns: f64,      // excess propagation delay [ns]
+    pub chord_m: f64,       // straight-line geometric distance between antennas [m]
+}
+
+/// Compute tropospheric excess path/delay for a fixed point-to-point link.
+///
+/// * `h1`, `h2`      antenna heights above mean sea level [m]
+/// * `ground_dist_m` surface arc distance between the two sites [m]
+/// * `p_hpa`,`t_k`,`rh` surface weather measured at altitude `h_ref_msl`
+/// * `segments`      integration steps along the path (200 is plenty)
+pub fn excess_delay(
+    h1: f64,
+    h2: f64,
+    ground_dist_m: f64,
+    p_hpa: f64,
+    t_k: f64,
+    rh: f64,
+    h_ref_msl: f64,
+    segments: usize,
+) -> ExcessDelay {
+    let (n_dry0, n_wet0) = surface_refractivity(p_hpa, t_k, rh);
+
+    // Endpoints in a 2-D Earth-centred plane (curvature kept in the geometry).
+    let r1 = RE + h1;
+    let r2 = RE + h2;
+    let alpha = ground_dist_m / RE; // subtended central angle [rad]
+    let (x1, y1) = (r1, 0.0);
+    let (x2, y2) = (r2 * alpha.cos(), r2 * alpha.sin());
+
+    let chord = ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt();
+    let ds = chord / segments as f64;
+
+    // Trapezoidal integration of N along the chord.
+    let mut sum_n = 0.0;
+    for i in 0..=segments {
+        let t = i as f64 / segments as f64;
+        let x = x1 + t * (x2 - x1);
+        let y = y1 + t * (y2 - y1);
+        let h_msl = (x * x + y * y).sqrt() - RE;
+        let n = refractivity_at(h_msl, h_ref_msl, n_dry0, n_wet0);
+        let w = if i == 0 || i == segments { 0.5 } else { 1.0 };
+        sum_n += w * n;
+    }
+
+    let excess_path_m = 1e-6 * sum_n * ds; // = integral( (n-1) ds )
+    let delay_ns = excess_path_m / C_VAC * 1e9;
+
+    ExcessDelay { excess_path_m, delay_ns, chord_m: chord }
+}
+
+// ---------------------------------------------------------------------------
+// Folding it into your surveyed-distance calibration
+// ---------------------------------------------------------------------------
+// Your one-time surveyed-distance offset already absorbs the atmosphere as it
+// was on calibration day. So in service apply only the CHANGE since then:
+//
+//   // once, on the day you calibrated against the known site-to-site distance:
+//   let ref_excess = excess_delay(h1, h2, d, p_cal, t_cal, rh_cal, h_ref, 200).excess_path_m;
+//
+//   // each measurement, with live weather from a BME280 at the station:
+//   let now = excess_delay(h1, h2, d, p_now, t_now, rh_now, h_ref, 200).excess_path_m;
+//   let dynamic_corr = now - ref_excess;                 // metres
+//   let true_distance = measured - survey_offset - dynamic_corr;
+//
+// If you did NOT do a surveyed calibration, subtract the absolute bias instead:
+//   let true_distance = measured - now;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sixty_km_mountain_link() {
+        // Mountaintop at 1500 m to a station at 300 m, 60 km apart, mild damp air.
+        let r = excess_delay(1500.0, 300.0, 60_000.0, 850.0, 283.15, 0.6, 1500.0, 200);
+        println!(
+            "chord = {:.1} m, excess = {:.2} m, delay = {:.1} ns",
+            r.chord_m, r.excess_path_m, r.delay_ns
+        );
+        assert!(r.excess_path_m > 5.0 && r.excess_path_m < 30.0);
+    }
+}
