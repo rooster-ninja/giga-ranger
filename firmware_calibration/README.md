@@ -9,21 +9,27 @@
 
 ## Flash Instructions
 
+PlatformIO must be installed (`pip install platformio` or via Homebrew).
+
 **1. Flash the slave board**
 ```bash
-cd ~/firmware_calibration
-~/.local/bin/pio run -e slave -t upload
+cd firmware_calibration
+pio run -e slave -t upload --upload-port /dev/cu.usbmodem<SLAVE>
 ```
 
 **2. Flash the master board**
 ```bash
-~/.local/bin/pio run -e master -t upload
+pio run -e master -t upload --upload-port /dev/cu.usbmodem<MASTER>
 ```
 
 **3. Open serial monitor on master (115200 baud)**
 ```bash
-~/.local/bin/pio device monitor
+pio device monitor --port /dev/cu.usbmodem<MASTER>
 ```
+
+Press RST on the master board — output appears after the 3-second startup delay.
+
+**Tip — find port:** `ls /dev/cu.*`
 
 ---
 
@@ -32,21 +38,38 @@ cd ~/firmware_calibration
 Assemble the signal chain before opening the monitor:
 
 ```
-[T3-S3 Master] ── SMA ── [40 dB atten] ── [1 m RG-316] ── [40 dB atten] ── SMA ── [T3-S3 Slave]
+[T3-S3 Master] ── SMA ── [40 dB atten] ── [1 m RG-316] ── SMA ── [T3-S3 Slave]
 ```
 
-Both boards inside steel chassis. **80 dB total attenuation required.**
+> **Note:** One 40 dB attenuator is sufficient at −18 dBm TX (−58 dBm at RX).
+> **Warning:** Never exceed +5 dBm — board has a PA FEM that will be damaged.
 
 | Step | Action |
 |---|---|
-| Run A | Flash and connect as above. Master collects 500 exchanges → prints `CalibrationValue_A` |
-| Run B | Swap board roles (re-flash `-e master` / `-e slave`), repeat → `CalibrationValue_B` |
+| Run A | Flash as above, connect cable+atten. Master collects 500 exchanges → prints `CalibrationValue_A` |
+| Run B | Swap board roles (re-flash `-e master` / `-e slave` on opposite boards), repeat → `CalibrationValue_B` |
 | Final | `CalibrationValue = (A + B) / 2` — averages out TX/RX path asymmetry |
 
 Write the result to production firmware:
 ```cpp
 radio.setRangingCalibration(YOUR_AVERAGED_VALUE);
 ```
+
+### Known results (2026-07-02)
+
+| Run | CalibrationValue |
+|---|---|
+| A (master=board1) | −35 |
+| B (master=board2) | _pending_ |
+| **Final** | **(−35 + B) / 2** |
+
+---
+
+## Implementation Notes
+
+- RadioLib does **not** map DIO1 to ranging IRQ events — firmware uses a 300 ms polling wait instead of ISR
+- Uncalibrated ranging returns ~−5 to −7 m (chip internal delays); this is normal and corrected by calibration
+- `getRangingResult()` returns metres; calibration formula converts to raw counts for `setRangingCalibration()`
 
 ---
 
@@ -64,7 +87,7 @@ radio.setRangingCalibration(YOUR_AVERAGED_VALUE);
 
 ## Pin Assignments (T3-S3 V1.3, SX1280)
 
-Confirmed from `T3_S3_V1.3_schematic.pdf`.
+Confirmed from schematic + community references. Earlier versions of this file incorrectly listed DIO1=36/BUSY=34.
 
 | Signal | GPIO |
 |---|---|
@@ -72,19 +95,19 @@ Confirmed from `T3_S3_V1.3_schematic.pdf`.
 | SCK | 5 |
 | MOSI | 6 |
 | MISO | 3 |
-| DIO1 | 33 |
-| BUSY | 34 |
+| DIO1 / IRQ | **9** |
+| BUSY | **36** |
 | RESET | 8 |
 
 ---
 
 ## Build Environment
 
-Verified on Arch Linux x86_64.
+Verified on macOS (Apple Silicon) and Arch Linux x86_64.
 
 | Component | Version |
 |---|---|
-| PlatformIO | 6.1.19 |
+| PlatformIO | 6.1.19+ |
 | RadioLib | 7.7.1 |
 | espressif32 platform | 7.0.1 |
 | Framework | Arduino |

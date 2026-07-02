@@ -8,19 +8,16 @@
 //   5. Record CalibrationValue printed at end of run
 //   6. Swap roles (re-flash with -e slave / -e master), repeat, average the two values
 //   7. Write averaged CalibrationValue to production firmware via radio.setRangingCalibration()
-//
-// Radio pins confirmed for T3-S3 V1.2; verify schematic for V1.3 if results look wrong.
 
 #include <Arduino.h>
 #include <SPI.h>
 #include <RadioLib.h>
 
 // ── Pin assignments ───────────────────────────────────────────────────────────
-// Source: T3_S3_V1.3_schematic.pdf — all confirmed. See Assets/T3S3_V1.3_SX1280_pins.md
 #define RADIO_NSS    7
-#define RADIO_DIO1  33
+#define RADIO_DIO1   9
 #define RADIO_RST    8
-#define RADIO_BUSY  34
+#define RADIO_BUSY  36
 #define SPI_SCK      5
 #define RADIO_MISO   3
 #define RADIO_MOSI   6
@@ -32,7 +29,7 @@
 #define CAL_SF            9
 #define CAL_TX_DBM      -18     // -18 dBm = SX1280 minimum; required when only one 40 dB atten available
                                 // (-18 dBm - 40 dB = -58 dBm at RX, within linear range)
-                                // Re-run at +13 dBm once second attenuator arrives (80 dB total)
+                                // WARNING: board has PA FEM — never exceed +5 dBm
 
 // Ranging address — must match on both boards
 #define RANGING_ADDR  0xDEADBEEF
@@ -67,25 +64,28 @@ IRAM_ATTR void onDio1() {
 // Blocking ranging exchange with timeout. Returns measured distance (m) or NAN on failure.
 float do_ranging(bool master) {
     isr_fired = false;
+    radio.setDio1Action(onDio1);
     int state = radio.startRanging(master, RANGING_ADDR);
-    if (state != RADIOLIB_ERR_NONE) return NAN;
-
-    unsigned long t0 = millis();
-    while (!isr_fired) {
-        if (millis() - t0 > TIMEOUT_MS) return NAN;
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.printf("# startRanging err %d\n", state);
+        return NAN;
     }
+
+    // Wait for ISR or fixed ceiling — DIO1 may not be mapped for ranging events
+    unsigned long t0 = millis();
+    while (!isr_fired && millis() - t0 < 300) yield();
 
     return radio.getRangingResult();
 }
 
 void setup() {
     Serial.begin(115200);
-    delay(2000);   // wait for USB CDC enumeration
+    delay(3000);
 
     SPI.begin(SPI_SCK, RADIO_MISO, RADIO_MOSI, RADIO_NSS);
 
     Serial.println("\n=== SX1280 Ranging Calibration ===");
-    Serial.printf("RF:    %.0f MHz  BW=%.0f kHz  SF%d  +%d dBm\n",
+    Serial.printf("RF:    %.0f MHz  BW=%.0f kHz  SF%d  %d dBm\n",
         CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, CAL_TX_DBM);
     Serial.printf("Cable: %.3f m physical  VF=%.3f  → %.4f m electrical\n\n",
         CABLE_PHYS_M, CABLE_VF, CABLE_ELEC_M);
@@ -114,7 +114,7 @@ void setup() {
 
     for (int i = 0; i < N_SAMPLES; i++) {
         float m = do_ranging(true);
-        if (!isnan(m) && m > 0.0f) {
+        if (!isnan(m)) {
             Serial.println(m, 4);
             sum    += m;
             sum_sq += (double)m * m;
@@ -158,10 +158,11 @@ void setup() {
     // ── SLAVE ─────────────────────────────────────────────────────────────────
     Serial.println("Role: SLAVE (responder)");
     Serial.println("Listening for master... (no output during exchanges)");
-    for (;;) {
-        do_ranging(false);   // respond and re-enter immediately
-    }
 #endif
 }
 
-void loop() {}
+void loop() {
+#ifndef CAL_MASTER
+    do_ranging(false);
+#endif
+}
