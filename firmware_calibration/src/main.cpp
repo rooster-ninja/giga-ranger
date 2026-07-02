@@ -30,7 +30,9 @@
 #define CAL_FREQ_MHZ  2450.0f
 #define CAL_BW_KHZ    1625.0f
 #define CAL_SF            9
-#define CAL_TX_DBM       13     // 13 dBm = production power; 80 dB atten keeps RX safe
+#define CAL_TX_DBM      -18     // -18 dBm = SX1280 minimum; required when only one 40 dB atten available
+                                // (-18 dBm - 40 dB = -58 dBm at RX, within linear range)
+                                // Re-run at +13 dBm once second attenuator arrives (80 dB total)
 
 // Ranging address — must match on both boards
 #define RANGING_ADDR  0xDEADBEEF
