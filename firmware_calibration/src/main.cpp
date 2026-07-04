@@ -44,12 +44,21 @@
 
 // Empirical conversion: 0.1803 m per raw SX1280 ranging count
 // Source: StuartsProjects 40 km field test; cross-check after initial radiated test
-#define METERS_PER_COUNT  0.1803f
+#define METERS_PER_COUNT  0.1803f  // SF9, BW=1625 kHz: c/(2×1625000×2^9)
 
 // ── Run parameters ────────────────────────────────────────────────────────────
 #define N_SAMPLES       500      // Wolf et al. used >1000; 500 is fast with good σ
 #define EXCHANGE_GAP_MS  20      // delay between exchanges (ms)
 #define TIMEOUT_MS     2000      // per-exchange timeout
+
+// Calibration table: AN1200.29 defaults — clean baseline for SF9 calibration run.
+// Row 0 = BW 406.25, Row 1 = BW 812.50, Row 2 = BW 1625. Columns = SF5–SF10.
+// SF9 entry = [2][4] = 13430. Adjust this value iteratively until mean ≈ CABLE_ELEC_M.
+static const uint16_t CAL_TABLE[3][6] = {
+    { 10299, 10271, 10244, 10242, 10230, 10246 },
+    { 11486, 11474, 11453, 11426, 11417, 11401 },
+    { 13308, 13493, 13528, 13515, 13089, 13376 },  // SF9 [2][4]: 13430 − 341 (iter 2: −3.229 m avg, 5 runs)
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -65,7 +74,7 @@ IRAM_ATTR void onDio1() {
 float do_ranging(bool master) {
     isr_fired = false;
     radio.setDio1Action(onDio1);
-    int state = radio.startRanging(master, RANGING_ADDR);
+    int state = radio.startRanging(master, RANGING_ADDR, CAL_TABLE);
     if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("# startRanging err %d\n", state);
         return NAN;
@@ -98,61 +107,66 @@ void setup() {
         while (true) delay(1000);
     }
     Serial.println("Radio OK");
-
-    // RxTxDelay register resets to 0x0000 on power-up — no zeroing needed.
-    // Do not call setRangingCalibration() before this measurement run.
     radio.setDio1Action(onDio1);
 
 #ifdef CAL_MASTER
     // ── MASTER ────────────────────────────────────────────────────────────────
-    Serial.println("Role: MASTER (initiator)");
-    Serial.printf("Collecting %d samples...\n\n", N_SAMPLES);
-    Serial.println("raw_m");   // CSV header for capture
+    Serial.println("Role: MASTER (Alpha)");
+    static int run_num = 0;
 
-    double sum = 0.0, sum_sq = 0.0;
-    int ok = 0, err = 0;
-
-    for (int i = 0; i < N_SAMPLES; i++) {
-        float m = do_ranging(true);
-        if (!isnan(m)) {
-            Serial.println(m, 4);
-            sum    += m;
-            sum_sq += (double)m * m;
-            ok++;
-        } else {
-            Serial.println("# timeout");
-            err++;
+    while (true) {
+        run_num++;
+        Serial.printf("\n[Run %d] Press SPACE to start...\n", run_num);
+        while (true) {
+            if (Serial.available() && Serial.read() == ' ') break;
         }
-        delay(EXCHANGE_GAP_MS);
+        Serial.printf("Collecting %d samples...\n\n", N_SAMPLES);
+        Serial.println("raw_m");   // CSV header for capture
+
+        double sum = 0.0, sum_sq = 0.0;
+        int ok = 0, err = 0, outlier = 0;
+
+        for (int i = 0; i < N_SAMPLES; i++) {
+            float m = do_ranging(true);
+            if (!isnan(m)) {
+                if (m < -8.0f || m > 2.0f) {
+                    Serial.printf("# outlier %.4f\n", m);
+                    outlier++;
+                } else {
+                    Serial.println(m, 4);
+                    sum    += m;
+                    sum_sq += (double)m * m;
+                    ok++;
+                }
+            } else {
+                Serial.println("# timeout");
+                err++;
+            }
+            delay(EXCHANGE_GAP_MS);
+        }
+
+        if (ok == 0) {
+            Serial.println("\n[ERROR] Zero successful exchanges.");
+            Serial.println("Check: Chimp-001 is running, cable connected, attenuators in place.");
+            continue;
+        }
+
+        double mean_m  = sum / ok;
+        double var     = (sum_sq / ok) - (mean_m * mean_m);
+        double sigma_m = sqrt(var < 0.0 ? 0.0 : var);
+        float  cal_val = (float)((mean_m - CABLE_ELEC_M) / METERS_PER_COUNT);
+
+        Serial.println("\n=== RESULTS ===");
+        Serial.printf("Run:          %d\n", run_num);
+        Serial.printf("Exchanges:    %d ok  /  %d failed  /  %d outlier\n", ok, err, outlier);
+        Serial.printf("Mean:         %.4f m\n", mean_m);
+        Serial.printf("Std dev:      %.4f m  (%.0f mm)\n", sigma_m, sigma_m * 1000.0);
+        Serial.printf("Cable (elec): %.4f m\n", (double)CABLE_ELEC_M);
+        Serial.printf("ESP32 die:    %.1f C\n", temperatureRead());
+        Serial.println();
+        Serial.printf(">>> CalibrationValue = %.0f  (SF%d) <<<\n", cal_val, CAL_SF);
+        Serial.println("\n--- Press SPACE to run again ---\n");
     }
-
-    if (ok == 0) {
-        Serial.println("\n[ERROR] Zero successful exchanges.");
-        Serial.println("Check: slave is running, cable connected, attenuators in place.");
-        return;
-    }
-
-    double mean_m  = sum / ok;
-    double var     = (sum_sq / ok) - (mean_m * mean_m);
-    double sigma_m = sqrt(var < 0.0 ? 0.0 : var);
-    float  cal_val = (float)((mean_m - CABLE_ELEC_M) / METERS_PER_COUNT);
-
-    Serial.println("\n=== RESULTS ===");
-    Serial.printf("Exchanges:    %d ok  /  %d failed\n", ok, err);
-    Serial.printf("Mean:         %.4f m\n", mean_m);
-    Serial.printf("Std dev:      %.4f m  (%.0f mm)\n", sigma_m, sigma_m * 1000.0);
-    Serial.printf("Cable (elec): %.4f m\n", (double)CABLE_ELEC_M);
-
-    Serial.println();
-    Serial.printf(">>> CalibrationValue = %.0f  (SF%d) <<<\n", cal_val, CAL_SF);
-    Serial.println();
-    Serial.println("--- Next steps ---");
-    Serial.println("1. Record CalibrationValue above.");
-    Serial.println("2. Swap board roles (re-flash -e slave on this board, -e master on other).");
-    Serial.println("3. Re-run and record second CalibrationValue.");
-    Serial.println("4. Final value = (run_A + run_B) / 2  (cancels TX/RX path asymmetry).");
-    Serial.println("5. In production firmware:");
-    Serial.printf("     radio.setRangingCalibration(YOUR_AVERAGED_VALUE);\n");
 
 #else
     // ── SLAVE ─────────────────────────────────────────────────────────────────
