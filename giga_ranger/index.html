@@ -529,6 +529,51 @@
       The T3-S3's onboard LiPo charger provides a free UPS — a small LiPo trickle-charges
       from the regulated 5 V rail and carries the node through cloudy spells or brief battery dips.
     </p>
+
+    <h3 style="margin-top:1.5rem;">3.3 V Direct — Bench / Low-Power Field Build</h3>
+    <p>
+      A regulated 3.3 V buck converter can feed the T3-S3's <strong>3V3 header pin</strong>
+      directly, bypassing the onboard LDO entirely. The same rail powers the BME280 sensor.
+      A JST-2 connector on the buck output makes field connection clean and reversible.
+    </p>
+    <table>
+      <thead><tr><th>Connection</th><th>Detail</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>3V3 buck (+) → T3-S3 3V3 header pin</td>
+          <td>Bypasses onboard LDO. Buck becomes the system regulator — must supply ≥ 500 mA peak.</td>
+        </tr>
+        <tr>
+          <td>3V3 buck (+) → BME280 VCC &amp; CSB</td>
+          <td>CSB tied high keeps BME280 in I²C mode.</td>
+        </tr>
+        <tr>
+          <td>GND → T3-S3 GND, BME280 GND &amp; SDO</td>
+          <td>SDO to GND sets I²C address 0x76.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- BME280 wiring -->
+  <section>
+    <h2>BME280 Wiring</h2>
+    <p>
+      The BME280 shares the T3-S3's onboard I²C bus (hardwired to SDA = GPIO 18, SCL = GPIO 17).
+      Both the OLED display and BME280 sit on the same two wires; I²C addressing keeps them separate
+      (OLED 0x3C, BME280 0x76).
+    </p>
+    <table>
+      <thead><tr><th>BME280 pin</th><th>T3-S3 connection</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>VCC</td><td>3V3 header pin (or 3V3 rail)</td><td></td></tr>
+        <tr><td>GND</td><td>GND</td><td></td></tr>
+        <tr><td>SDA</td><td>GPIO 18</td><td>Shared with OLED</td></tr>
+        <tr><td>SCL</td><td>GPIO 17</td><td>Shared with OLED</td></tr>
+        <tr><td>SDO</td><td>GND</td><td>Sets I²C address 0x76</td></tr>
+        <tr><td>CSB</td><td>3V3</td><td>Holds device in I²C mode</td></tr>
+      </tbody>
+    </table>
   </section>
 
   <!-- Install notes -->
