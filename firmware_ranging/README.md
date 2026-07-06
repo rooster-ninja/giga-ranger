@@ -81,11 +81,15 @@ ALPHA
 BLE:CONN
 ──────────
 60234.1 m
-RSSI:-82dBm
-SNR: 12.3dB
+RSSI:-82
+SNR:12.3
 ──────────
-OK:   1234
-DIE: 31.2C
+OK:  1234
+DIE:31.2C
+──────────
+T:22.1C
+H:45.2%
+P:1013hPa
 ```
 
 **Chimp-001** (slave does not compute distance):
@@ -93,12 +97,18 @@ DIE: 31.2C
 CHIMP-001
 BLE:WAIT
 ──────────
-RSSI:-84dBm
-SNR: 11.8dB
+RSSI:-84
+SNR:11.8
 ──────────
-OK:   1234
-DIE: 28.5C
+OK:  1234
+DIE:28.5C
+──────────
+T:22.1C
+H:45.2%
+P:1013hPa
 ```
+
+BME280 lines show `NA` when sensor is not connected.
 
 ---
 
@@ -113,10 +123,10 @@ DIE: 28.5C
 | SX1280 DIO1 | 9 | |
 | SX1280 BUSY | 36 | |
 | SX1280 RESET | 8 | |
-| OLED SDA | 17 | I2C shared with BME280 |
-| OLED SCL | 18 | I2C shared with BME280 |
-| BME280 SDA | 17 | Address 0x76 (SDO→GND) |
-| BME280 SCL | 18 | |
+| OLED SDA | 18 | I2C shared with BME280 |
+| OLED SCL | 17 | I2C shared with BME280 |
+| BME280 SDA | 18 | Address 0x76 (SDO→GND) |
+| BME280 SCL | 17 | |
 
 OLED I2C address: `0x3C`. Display: SSD1306 128×64.
 

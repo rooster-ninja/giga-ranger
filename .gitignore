@@ -1,3 +1,7 @@
 .DS_Store
 firmware_calibration/.pio/
 firmware_calibration/.vscode/
+firmware_ranging/.pio/
+firmware_ranging/.vscode/
+tools/**/.pio/
+tools/**/.vscode/

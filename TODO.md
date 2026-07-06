@@ -21,12 +21,17 @@
 - [x] Two build environments: `[env:alpha]` (master) and `[env:chimp-001]` (slave)
 - [x] Continuous ranging loop with configurable interval (RANGING_INTERVAL_MS, default 5s)
 - [x] BLE NUS monitoring — GR-ALPHA / GR-CHIMP001, one line per exchange
-- [x] OLED display rotated 90° (portrait): role, BLE status, range, RSSI, SNR, OK count, die temp
+- [x] OLED display rotated 90° (portrait): role, BLE status, range, RSSI, link status, die temp
 - [x] Outlier filter: delta gate (±500 m) + rolling median N=5
-- [x] BME280 I²C on GPIO17/GPIO18 (shared bus with OLED)
+- [x] BME280 I²C on separate bus GPIO10/GPIO21 (connector 1); OLED on hardwired GPIO17/GPIO18
 - [x] No WiFi, no MQTT, no provisioning
+- [x] Alpha RSSI via REG_RANGING_RSSI (0x0964) — GetPacketStatus not populated for ranging master
+- [x] Link detection: stale register detection + 30 s software timeout (LINK_TIMEOUT_MS), both devices
+- [x] Distance clears immediately on Alpha when no exchange; RSSI clears at link timeout
+- [x] SNR removed from Alpha display and BLE (not available for ranging master, no dedicated register)
+- [x] Alpha BLE: DBG lines removed — data-only output (ALPHA,... lines); DBG retained on USB serial
+- [x] BME280 T/H/P in Alpha BLE output (temp=, hum=, pres= fields in ALPHA line)
 - [ ] **Field test:** verify range reads ~60 km at deployment, observe natural σ, tighten DELTA_GATE_M
-- [ ] **BME280 data in BLE output:** add T/H/P fields to Alpha's BLE NUS line for atmospheric logging
 
 ## Website / Docs
 - [ ] Update project overview page (rooster.ninja) — SF9 as production SF, Alpha/Chimp-001 naming
@@ -36,3 +41,7 @@
 
 ## Discussion
 - [ ] Arduino timing concern vs Rust: SX1280 hardware owns all precision-critical timing; firmware jitter only affects inter-exchange gap (coarse, seconds). Rust would not improve ranging precision. Needs brief write-up in docs.
+
+## Notes
+
+**Signal exclusivity (2.4 GHz interference):** The SX1280 in slave mode only updates its RSSI register when it demodulates a LoRa packet matching all three of: 2450 MHz, SF9/BW1625, and the 32-bit ranging address `0xDEADBEEF`. WiFi, Bluetooth, and other 2.4 GHz traffic use entirely different modulation (OFDM/FHSS) — the SX1280 hardware ignores them at the demodulator level. Only another SX1280 running identical parameters could trigger a false read.
