@@ -166,9 +166,9 @@ as extra distance:
 
 Implies total cable run ≈ 3.4 m (5.1 × 0.66). Collect more samples and average to tighten the reference.
 
-> **Note:** This setup is for warmup and signal-level verification only. CAL_TABLE calibration
-> must be done in free air at a known physical distance — the cable velocity factor is not
-> accounted for in the calibration firmware's target distance.
+> **Calibration with this setup:** set the calibration firmware's target distance to the
+> cable electrical length (observed ~5.1 m), not the physical device separation.
+> The CAL_TABLE will be equally valid for field deployment in free air.
 
 ---
 
