@@ -57,17 +57,17 @@ Advertisement names:
 
 ### BLE output format
 
-**Alpha** (one line per exchange):
+**Alpha** (one line per accepted exchange):
 ```
-ALPHA,t=1234,r=60234.1,rssi=-82,snr=12.3,ok=1234,rej=2
-```
-
-**Chimp-001** (one line per exchange):
-```
-CHIMP,t=1234,rssi=-84,snr=11.8,ok=1234
+ALPHA,t=1234,dist_m=60234.1,rssi=-82,die=31.2,temp=22.1,hum=45.2,pres=1013.2,ok=1234,rej=2
 ```
 
-`t` = seconds since boot. `r` = rolling median range in metres. `rej` = outlier count.
+**Chimp-001** (one line per cycle, all cycles including stale):
+```
+DBG,t=1234,rssi=-84.0,snr=11.8,exch=1,link=OK,age=0,ok=1234
+```
+
+`t` = seconds since boot. `dist_m` = rolling median range in metres. `exch` = 1 if a new exchange was detected this cycle. `age` = seconds since last exchange.
 
 ---
 
@@ -82,9 +82,8 @@ BLE:CONN
 ──────────
 60234.1 m
 RSSI:-82
-SNR:12.3
 ──────────
-OK:  1234
+Link: OK
 DIE:31.2C
 ──────────
 T:22.1C
@@ -143,6 +142,33 @@ Two-stage filter on Alpha's range readings:
 
 2. **Rolling median (N=5)** — published range is the median of the last 5 accepted readings.
    Naturally resistant to remaining outliers; smooths residual noise.
+
+---
+
+## Bench Verification — SMA Cable + Attenuator
+
+A wired loopback with an inline attenuator provides a stable, repeatable reference
+reading for bench testing without free-air path concerns.
+
+**Setup:** SMA → RG316 coax → −40 dB attenuator → SMA (looped between Alpha and Chimp-001)
+
+The expected reading is the **cable electrical path length**, not the physical device separation.
+RG316 has a velocity factor of ~0.66, so the SX1280 interprets the slower propagation
+as extra distance:
+
+> apparent distance (m) = total cable length (m) ÷ 0.66
+
+**Observed reference** (2026-07-07, die 28–29°C, N=6):
+
+| Min | Max | Mean (est.) |
+|-----|-----|-------------|
+| 4.6 m | 5.7 m | ~5.1 m |
+
+Implies total cable run ≈ 3.4 m (5.1 × 0.66). Collect more samples and average to tighten the reference.
+
+> **Note:** This setup is for warmup and signal-level verification only. CAL_TABLE calibration
+> must be done in free air at a known physical distance — the cable velocity factor is not
+> accounted for in the calibration firmware's target distance.
 
 ---
 
