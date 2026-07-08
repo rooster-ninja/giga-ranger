@@ -158,13 +158,17 @@ as extra distance:
 
 > apparent distance (m) = total cable length (m) ÷ 0.66
 
-**Observed reference** (2026-07-07, die 28–29°C, N=6):
+**Observed reference** (2026-07-08, die 38.3°C plateau, N=1030, rej=0):
 
-| Min | Max | Mean (est.) |
-|-----|-----|-------------|
-| 4.6 m | 5.7 m | ~5.1 m |
+| Min | Max | Mean | σ |
+|-----|-----|------|---|
+| 5.1 m | 7.2 m | **6.130 m** | 0.371 m |
 
-Implies total cable run ≈ 3.4 m (5.1 × 0.66). Collect more samples and average to tighten the reference.
+RSSI stable at −63 dBm. Die temp plateaued at 38.3°C — the closed metal box dissipates
+heat fast enough to prevent further rise. To reach higher die temps, open the lid or use
+a heat chamber.
+
+Use **6.130 m** as the calibration firmware target distance for this test jig at ~38°C.
 
 > **Calibration with this setup:** set the calibration firmware's target distance to the
 > cable electrical length (observed ~5.1 m), not the physical device separation.
