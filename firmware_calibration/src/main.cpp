@@ -11,7 +11,9 @@
 
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
 #include <RadioLib.h>
+#include <Adafruit_BME280.h>
 
 // ── Pin assignments ───────────────────────────────────────────────────────────
 #define RADIO_NSS    7
@@ -62,7 +64,13 @@ static const uint16_t CAL_TABLE[3][6] = {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+#define BME_SDA  21
+#define BME_SCL  10
+#define BME_ADDR 0x76
+
 SX1280 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
+Adafruit_BME280 bme;
+static bool bme_ok = false;
 
 volatile bool isr_fired = false;
 
@@ -91,6 +99,11 @@ void setup() {
     Serial.begin(115200);
     delay(3000);
 
+    Wire1.begin(BME_SDA, BME_SCL);
+    bme_ok = bme.begin(BME_ADDR, &Wire1);
+    if (!bme_ok) bme_ok = bme.begin(0x77, &Wire1);
+    Serial.printf("BME280: %s\n", bme_ok ? "OK" : "NA");
+
     SPI.begin(SPI_SCK, RADIO_MISO, RADIO_MOSI, RADIO_NSS);
 
     Serial.println("\n=== SX1280 Ranging Calibration ===");
@@ -113,7 +126,7 @@ void setup() {
     // ── MASTER — continuous CSV logging ───────────────────────────────────────
     Serial.println("Role: MASTER (Alpha)");
     Serial.println("# Continuous run — Ctrl-C to stop, pipe output to CSV on laptop");
-    Serial.println("t_ms,raw_m,die_c");  // CSV header
+    Serial.println("t_ms,raw_m,die_c,amb_c");  // CSV header
 
     double sum = 0.0, sum_sq = 0.0;
     int ok = 0, err = 0, outlier = 0;
@@ -121,6 +134,7 @@ void setup() {
     while (true) {
         float m   = do_ranging(true);
         float die = (float)temperatureRead();
+        float amb = bme_ok ? bme.readTemperature() : NAN;
         unsigned long t = millis();
 
         if (!isnan(m)) {
@@ -128,7 +142,10 @@ void setup() {
                 Serial.printf("# outlier %.4f die=%.1f\n", m, die);
                 outlier++;
             } else {
-                Serial.printf("%lu,%.4f,%.1f\n", t, m, die);
+                if (isnan(amb))
+                    Serial.printf("%lu,%.4f,%.1f,NA\n", t, m, die);
+                else
+                    Serial.printf("%lu,%.4f,%.1f,%.2f\n", t, m, die, amb);
                 sum    += m;
                 sum_sq += (double)m * m;
                 ok++;
