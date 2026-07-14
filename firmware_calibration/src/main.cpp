@@ -124,7 +124,7 @@ void setup() {
         unsigned long t = millis();
 
         if (!isnan(m)) {
-            if (m < -8.0f || m > 2.0f) {
+            if (m < -20.0f || m > 30.0f) {
                 Serial.printf("# outlier %.4f die=%.1f\n", m, die);
                 outlier++;
             } else {
