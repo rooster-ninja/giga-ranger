@@ -51,6 +51,7 @@
 // ── Run parameters ────────────────────────────────────────────────────────────
 #define N_SAMPLES       500      // Wolf et al. used >1000; 500 is fast with good σ
 #define EXCHANGE_GAP_MS  20      // delay between exchanges (ms)
+#define CPU_BURN_MS     200      // busy-loop after each exchange to match production thermal load
 #define TIMEOUT_MS     2000      // per-exchange timeout
 
 // Calibration table: AN1200.29 defaults — clean baseline for SF9 calibration run.
@@ -166,6 +167,8 @@ void setup() {
         }
 
         delay(EXCHANGE_GAP_MS);
+        // busy-loop to match production firmware thermal load
+        { volatile uint32_t x = 0; uint32_t t0 = millis(); while (millis() - t0 < CPU_BURN_MS) x++; }
     }
 
 #else
