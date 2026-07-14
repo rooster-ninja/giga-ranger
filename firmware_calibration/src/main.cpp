@@ -171,12 +171,18 @@ void setup() {
 #else
     // ── SLAVE ─────────────────────────────────────────────────────────────────
     Serial.println("Role: SLAVE (responder)");
-    Serial.println("Listening for master... (no output during exchanges)");
+    Serial.println("t_ms,die_c,amb_c");
 #endif
 }
 
 void loop() {
 #ifndef CAL_MASTER
     do_ranging(false);
+    float die = (float)temperatureRead();
+    float amb = bme_ok ? bme.readTemperature() : NAN;
+    if (isnan(amb))
+        Serial.printf("%lu,%.1f,NA\n", millis(), die);
+    else
+        Serial.printf("%lu,%.1f,%.2f\n", millis(), die, amb);
 #endif
 }
