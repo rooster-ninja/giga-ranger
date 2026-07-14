@@ -18,6 +18,7 @@
 #include <U8g2lib.h>
 #include <Adafruit_BME280.h>
 #include <NimBLEDevice.h>
+#include <SD.h>
 
 // ── RF pin assignments (T3-S3 V1.3) ──────────────────────────────────────────
 #define RADIO_NSS    7
@@ -37,6 +38,17 @@
 #define BME_SDA     21   // connector 1 pin IO21
 #define BME_SCL     10   // connector 1 pin IO10
 #define BME_ADDR    0x76 // SDO→GND; use 0x77 if SDO→VCC
+
+// ── SD/TF card SPI (T3-S3 V1.3) — verify against schematic before first flash ─
+#define SD_CS    13
+#define SD_MOSI  11
+#define SD_SCK   14
+#define SD_MISO   2
+#ifdef ROLE_ALPHA
+#define SD_LOG_FILE "/ALPHA.CSV"
+#else
+#define SD_LOG_FILE "/CHIMP.CSV"
+#endif
 
 // ── RF parameters — must match calibration firmware exactly ──────────────────
 #define RF_FREQ_MHZ   2450.0f
@@ -73,6 +85,34 @@ static bool bme_ok = false;
 // BLE state
 static NimBLECharacteristic *ble_tx = nullptr;
 static bool ble_connected = false;
+
+// SD + epoch state
+static SPIClass  sd_spi(HSPI);
+static bool      sd_ok      = false;
+static uint32_t  boot_epoch = 0;  // unix seconds at boot; 0 = not set; set via BLE EPOCH=<n>
+
+class BleRxCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &) override {
+        std::string val = c->getValue();
+        if (val.rfind("EPOCH=", 0) == 0) {
+            uint32_t epoch = (uint32_t)strtoul(val.c_str() + 6, nullptr, 10);
+            if (epoch > 1700000000UL) {  // sanity: after 2023
+                boot_epoch = epoch - millis() / 1000;
+                Serial.printf("[BLE] epoch set: boot=%lu\n", boot_epoch);
+                if (sd_ok) {
+                    File f = SD.open(SD_LOG_FILE, FILE_APPEND);
+                    if (f) {
+                        char buf[64];
+                        snprintf(buf, sizeof(buf), "BOOT,epoch=%lu,t=%lu\n",
+                            boot_epoch, millis() / 1000);
+                        f.print(buf);
+                        f.close();
+                    }
+                }
+            }
+        }
+    }
+};
 
 class BleCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer *, NimBLEConnInfo &) override {
@@ -198,6 +238,22 @@ void ble_send(const char *line) {
     }
 }
 
+static void sd_log(const char *line) {
+    if (!sd_ok) return;
+    File f = SD.open(SD_LOG_FILE, FILE_APPEND);
+    if (!f) return;
+    f.print(line);
+    f.close();
+}
+
+static void epoch_field(char *buf, size_t len) {
+    if (boot_epoch == 0) {
+        strncpy(buf, "NA", len);
+    } else {
+        snprintf(buf, len, "%lu", boot_epoch + millis() / 1000);
+    }
+}
+
 // ── Display ───────────────────────────────────────────────────────────────────
 
 // U8G2_R3 portrait: 64 px wide × 128 px tall.
@@ -215,28 +271,52 @@ void update_display() {
     display.clearBuffer();
     display.setFont(u8g2_font_6x10_tr);
 
-    // ── Role + BLE ──
+    // ── Role + BLE + SD ──
 #ifdef ROLE_ALPHA
     display.drawStr(0, 10, "ALPHA");
 #else
     display.drawStr(0, 10, "CHIMP-001");
 #endif
     display.drawStr(0, 20, ble_connected ? "BLE:CONN" : "BLE:WAIT");
-    display.drawHLine(0, 24, 64);
+    display.drawStr(0, 30, sd_ok ? "SD:LOG" : "SD:NA");
+    display.drawHLine(0, 34, 64);
 
     // ── RF section ──
 #ifdef ROLE_ALPHA
     if (isnan(display_range)) {
-        display.drawStr(0, 34, "---");
+        display.drawStr(0, 44, "---");
     } else if (display_range >= 1000.0f) {
         snprintf(buf, sizeof(buf), "%.3f km", display_range / 1000.0f);
+        display.drawStr(0, 44, buf);
     } else {
         snprintf(buf, sizeof(buf), "%.1f m", display_range);
+        display.drawStr(0, 44, buf);
     }
-    if (!isnan(display_range)) display.drawStr(0, 34, buf);
+    snprintf(buf, sizeof(buf), "RSSI:%.0f", display_rssi);
+    display.drawStr(0, 54, buf);
+    display.drawHLine(0, 62, 64);
+    display.drawStr(0, 78, link_ok ? "Link: OK" : "Link: --");
+    snprintf(buf, sizeof(buf), "DIE:%.1fC", (float)temperatureRead());
+    display.drawStr(0, 88, buf);
+    display.drawHLine(0, 92, 64);
+    if (bme_ok) {
+        snprintf(buf, sizeof(buf), "T:%.1fC", bme.readTemperature());
+        display.drawStr(0, 102, buf);
+        snprintf(buf, sizeof(buf), "H:%.1f%%", bme.readHumidity());
+        display.drawStr(0, 112, buf);
+        snprintf(buf, sizeof(buf), "P:%.0fhPa", bme.readPressure() / 100.0f);
+        display.drawStr(0, 122, buf);
+    } else {
+        display.drawStr(0, 102, "T:NA");
+        display.drawStr(0, 112, "H:NA");
+        display.drawStr(0, 122, "P:NA");
+    }
+#else
     snprintf(buf, sizeof(buf), "RSSI:%.0f", display_rssi);
     display.drawStr(0, 44, buf);
-    display.drawHLine(0, 52, 64);
+    snprintf(buf, sizeof(buf), "SNR:%.1f", display_snr);
+    display.drawStr(0, 54, buf);
+    display.drawHLine(0, 58, 64);
     display.drawStr(0, 68, link_ok ? "Link: OK" : "Link: --");
     snprintf(buf, sizeof(buf), "DIE:%.1fC", (float)temperatureRead());
     display.drawStr(0, 78, buf);
@@ -252,28 +332,6 @@ void update_display() {
         display.drawStr(0, 92,  "T:NA");
         display.drawStr(0, 102, "H:NA");
         display.drawStr(0, 112, "P:NA");
-    }
-#else
-    snprintf(buf, sizeof(buf), "RSSI:%.0f", display_rssi);
-    display.drawStr(0, 34, buf);
-    snprintf(buf, sizeof(buf), "SNR:%.1f", display_snr);
-    display.drawStr(0, 44, buf);
-    display.drawHLine(0, 48, 64);
-    display.drawStr(0, 58, link_ok ? "Link: OK" : "Link: --");
-    snprintf(buf, sizeof(buf), "DIE:%.1fC", (float)temperatureRead());
-    display.drawStr(0, 68, buf);
-    display.drawHLine(0, 72, 64);
-    if (bme_ok) {
-        snprintf(buf, sizeof(buf), "T:%.1fC", bme.readTemperature());
-        display.drawStr(0, 82, buf);
-        snprintf(buf, sizeof(buf), "H:%.1f%%", bme.readHumidity());
-        display.drawStr(0, 92, buf);
-        snprintf(buf, sizeof(buf), "P:%.0fhPa", bme.readPressure() / 100.0f);
-        display.drawStr(0, 102, buf);
-    } else {
-        display.drawStr(0, 82,  "T:NA");
-        display.drawStr(0, 92,  "H:NA");
-        display.drawStr(0, 102, "P:NA");
     }
 #endif
 
@@ -294,7 +352,7 @@ void ble_init(const char *name) {
 
     NimBLECharacteristic *rx = svc->createCharacteristic(NUS_RX_UUID,
                 NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-    (void)rx; // RX commands not implemented in V1
+    rx->setCallbacks(new BleRxCallbacks());
 
     NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
     adv->addServiceUUID(NUS_SERVICE_UUID);
@@ -322,6 +380,18 @@ void setup() {
 #endif
     display.drawStr(0, 22, "Init...");
     display.sendBuffer();
+
+    // SD card — CS not passed to sd_spi.begin(); SD.begin() manages CS itself
+    sd_spi.begin(SD_SCK, SD_MISO, SD_MOSI);
+    for (int i = 0; i < 3 && !sd_ok; i++) {
+        delay(200);
+        sd_ok = SD.begin(SD_CS, sd_spi, 4000000);
+    }
+    if (sd_ok) {
+        Serial.println("[OK] SD card mounted");
+    } else {
+        Serial.println("[WARN] SD not found — logging to serial only");
+    }
 
     // BME280 — Wire1, connector 1 (IO21=SDA, IO10=SCL)
     bme_ok = bme.begin(BME_ADDR, &Wire1);
@@ -389,11 +459,21 @@ void loop() {
     link_ok = had_exchange && (millis() - last_ok_ms < LINK_TIMEOUT_MS);
 
     uint32_t age_s = had_exchange ? (millis() - last_ok_ms) / 1000 : 99;
-    snprintf(line, sizeof(line),
-        "DBG,t=%lu,range=%.2f,rssi=%.0f,exch=%d,link=%s,age=%lu,ok=%lu\n",
-        millis() / 1000, dbg_range, dbg_rssi, (int)exchange,
-        link_ok ? "OK" : "--", (unsigned long)age_s, (unsigned long)ok_count);
+    {
+        char s_temp[8], s_hum[8], s_epoch[16];
+        if (bme_ok) {
+            snprintf(s_temp, sizeof(s_temp), "%.1f", bme.readTemperature());
+            snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme.readHumidity());
+        } else { strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); }
+        epoch_field(s_epoch, sizeof(s_epoch));
+        snprintf(line, sizeof(line),
+            "DBG,t=%lu,epoch=%s,range=%.2f,rssi=%.0f,exch=%d,link=%s,age=%lu,ok=%lu,die=%.1f,temp=%s,hum=%s\n",
+            millis() / 1000, s_epoch, dbg_range, dbg_rssi, (int)exchange,
+            link_ok ? "OK" : "--", (unsigned long)age_s, (unsigned long)ok_count,
+            (float)temperatureRead(), s_temp, s_hum);
+    }
     Serial.print(line);
+    sd_log(line);
 
     // Distance clears immediately when no exchange detected this cycle.
     // RSSI waits for the full link_ok timeout before clearing.
@@ -411,7 +491,7 @@ void loop() {
             display_range = median;
 
             float die = temperatureRead();
-            char s_temp[8], s_hum[8], s_pres[10];
+            char s_temp[8], s_hum[8], s_pres[10], s_epoch[16];
             if (bme_ok) {
                 snprintf(s_temp, sizeof(s_temp), "%.1f", bme.readTemperature());
                 snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme.readHumidity());
@@ -419,17 +499,19 @@ void loop() {
             } else {
                 strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); strcpy(s_pres, "NA");
             }
+            epoch_field(s_epoch, sizeof(s_epoch));
 
             Serial.printf("range=%.1f m  rssi=%.0f  ok=%lu\n",
                 median, display_rssi, (unsigned long)ok_count);
 
             snprintf(line, sizeof(line),
-                "ALPHA,t=%lu,dist_m=%.1f,rssi=%.0f"
+                "ALPHA,t=%lu,epoch=%s,dist_m=%.1f,rssi=%.0f"
                 ",die=%.1f,temp=%s,hum=%s,pres=%s,ok=%lu,rej=%lu\n",
-                millis() / 1000, median, display_rssi,
+                millis() / 1000, s_epoch, median, display_rssi,
                 die, s_temp, s_hum, s_pres,
                 (unsigned long)ok_count, (unsigned long)rej_count);
             ble_send(line);
+            sd_log(line);
         } else {
             rej_count++;
             Serial.printf("# outlier rejected: %.1f m  (last_valid=%.1f)\n", raw, last_valid);
@@ -472,12 +554,22 @@ void loop() {
 
     // age = seconds since last detected exchange (watch this count toward 30 → link flips)
     uint32_t age_s = had_exchange ? (millis() - last_ok_ms) / 1000 : 99;
-    char line[96];
-    snprintf(line, sizeof(line),
-        "DBG,t=%lu,rssi=%.1f,snr=%.1f,exch=%d,link=%s,age=%lu,ok=%lu\n",
-        millis() / 1000, dbg_rssi, dbg_snr, (int)exchange,
-        link_ok ? "OK" : "--", (unsigned long)age_s, (unsigned long)ok_count);
+    char line[192];
+    {
+        char s_temp[8], s_hum[8], s_epoch[16];
+        if (bme_ok) {
+            snprintf(s_temp, sizeof(s_temp), "%.1f", bme.readTemperature());
+            snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme.readHumidity());
+        } else { strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); }
+        epoch_field(s_epoch, sizeof(s_epoch));
+        snprintf(line, sizeof(line),
+            "DBG,t=%lu,epoch=%s,rssi=%.1f,snr=%.1f,exch=%d,link=%s,age=%lu,ok=%lu,die=%.1f,temp=%s,hum=%s\n",
+            millis() / 1000, s_epoch, dbg_rssi, dbg_snr, (int)exchange,
+            link_ok ? "OK" : "--", (unsigned long)age_s, (unsigned long)ok_count,
+            (float)temperatureRead(), s_temp, s_hum);
+    }
     Serial.print(line);
+    sd_log(line);
     ble_send(line);
 }
 

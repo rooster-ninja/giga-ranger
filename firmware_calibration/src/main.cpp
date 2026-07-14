@@ -110,62 +110,45 @@ void setup() {
     radio.setDio1Action(onDio1);
 
 #ifdef CAL_MASTER
-    // ── MASTER ────────────────────────────────────────────────────────────────
+    // ── MASTER — continuous CSV logging ───────────────────────────────────────
     Serial.println("Role: MASTER (Alpha)");
-    static int run_num = 0;
+    Serial.println("# Continuous run — Ctrl-C to stop, pipe output to CSV on laptop");
+    Serial.println("t_ms,raw_m,die_c");  // CSV header
+
+    double sum = 0.0, sum_sq = 0.0;
+    int ok = 0, err = 0, outlier = 0;
 
     while (true) {
-        run_num++;
-        Serial.printf("\n[Run %d] Press SPACE to start...\n", run_num);
-        while (true) {
-            if (Serial.available() && Serial.read() == ' ') break;
-        }
-        Serial.printf("Collecting %d samples...\n\n", N_SAMPLES);
-        Serial.println("raw_m");   // CSV header for capture
+        float m   = do_ranging(true);
+        float die = (float)temperatureRead();
+        unsigned long t = millis();
 
-        double sum = 0.0, sum_sq = 0.0;
-        int ok = 0, err = 0, outlier = 0;
-
-        for (int i = 0; i < N_SAMPLES; i++) {
-            float m = do_ranging(true);
-            if (!isnan(m)) {
-                if (m < -8.0f || m > 2.0f) {
-                    Serial.printf("# outlier %.4f\n", m);
-                    outlier++;
-                } else {
-                    Serial.println(m, 4);
-                    sum    += m;
-                    sum_sq += (double)m * m;
-                    ok++;
-                }
+        if (!isnan(m)) {
+            if (m < -8.0f || m > 2.0f) {
+                Serial.printf("# outlier %.4f die=%.1f\n", m, die);
+                outlier++;
             } else {
-                Serial.println("# timeout");
-                err++;
+                Serial.printf("%lu,%.4f,%.1f\n", t, m, die);
+                sum    += m;
+                sum_sq += (double)m * m;
+                ok++;
             }
-            delay(EXCHANGE_GAP_MS);
+        } else {
+            Serial.printf("# timeout t=%lu\n", t);
+            err++;
         }
 
-        if (ok == 0) {
-            Serial.println("\n[ERROR] Zero successful exchanges.");
-            Serial.println("Check: Chimp-001 is running, cable connected, attenuators in place.");
-            continue;
+        // Rolling summary every 100 accepted samples
+        if (ok > 0 && ok % 100 == 0) {
+            double mean_m  = sum / ok;
+            double var     = (sum_sq / ok) - (mean_m * mean_m);
+            double sigma_m = sqrt(var < 0.0 ? 0.0 : var);
+            float  cal_val = (float)((mean_m - CABLE_ELEC_M) / METERS_PER_COUNT);
+            Serial.printf("# [n=%d] mean=%.4f m  sigma=%.4f m  die=%.1f C  CalVal=%.0f\n",
+                ok, mean_m, sigma_m, die, cal_val);
         }
 
-        double mean_m  = sum / ok;
-        double var     = (sum_sq / ok) - (mean_m * mean_m);
-        double sigma_m = sqrt(var < 0.0 ? 0.0 : var);
-        float  cal_val = (float)((mean_m - CABLE_ELEC_M) / METERS_PER_COUNT);
-
-        Serial.println("\n=== RESULTS ===");
-        Serial.printf("Run:          %d\n", run_num);
-        Serial.printf("Exchanges:    %d ok  /  %d failed  /  %d outlier\n", ok, err, outlier);
-        Serial.printf("Mean:         %.4f m\n", mean_m);
-        Serial.printf("Std dev:      %.4f m  (%.0f mm)\n", sigma_m, sigma_m * 1000.0);
-        Serial.printf("Cable (elec): %.4f m\n", (double)CABLE_ELEC_M);
-        Serial.printf("ESP32 die:    %.1f C\n", temperatureRead());
-        Serial.println();
-        Serial.printf(">>> CalibrationValue = %.0f  (SF%d) <<<\n", cal_val, CAL_SF);
-        Serial.println("\n--- Press SPACE to run again ---\n");
+        delay(EXCHANGE_GAP_MS);
     }
 
 #else
