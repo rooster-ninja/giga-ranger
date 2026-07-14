@@ -181,6 +181,7 @@ void setup() {
 void loop() {
 #ifndef CAL_MASTER
     do_ranging(false);
+    { volatile uint32_t x = 0; uint32_t t0 = millis(); while (millis() - t0 < CPU_BURN_MS) x++; }
     float die = (float)temperatureRead();
     float amb = bme_ok ? bme.readTemperature() : NAN;
     if (isnan(amb))
