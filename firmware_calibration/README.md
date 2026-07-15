@@ -117,6 +117,53 @@ radio.startRanging(master, RANGING_ADDR, CAL_TABLE);
 
 ---
 
+## Temperature Characterisation — 2026-07-15
+
+A 110-minute continuous log was collected to measure how ranging results drift with die temperature. Both devices ran the CPU burn firmware (core 0 continuous + 400 ms/exchange on core 1) to self-heat, then a heat gun was applied to the shielded RF enclosure to drive temperatures above the natural CPU plateau.
+
+### Setup
+
+```
+[Alpha (master)] ── SMA ── [40 dB atten] ── [1 m RG-316] ── SMA ── [Chimp-001 (slave)]
+```
+
+Both devices in sealed RF enclosures. CSV logs captured simultaneously on separate serial terminals:
+
+```bash
+pio device monitor --port /dev/ttyACM1 --baud 115200 | tee master_YYYYMMDD_HHMMSS.csv
+pio device monitor --port /dev/ttyACM2 --baud 115200 | tee slave_YYYYMMDD_HHMMSS.csv
+```
+
+### Key epochs
+
+| Time | Event |
+|---|---|
+| t = 0 s | Boot — both devices cold (~29°C die) |
+| t = 0–43 min | CPU burn warmup — die climbs to 36–37°C plateau |
+| t = 43.5 min | Heat gun applied to Alpha enclosure |
+| t = 47.1 min | Alpha peak die temp: **54.3°C** |
+| t = 49.3 min | Chimp peak die temp: **52.6°C** |
+| t = 110 min | Log end |
+
+### Results
+
+| Phase | Die range | Coefficient | R² | n |
+|---|---|---|---|---|
+| CPU warmup | 30–38°C | **−0.085 m/°C** | 0.007 | 6 114 |
+| Heat gun | >38°C | ~0 m/°C | <0.001 | 2 921 |
+
+**Temperature coefficient: −0.085 m/°C** (warmup phase).
+
+As die temperature increases, raw ranging result drifts negative (apparent distance decreases). The effect is real but small relative to per-sample noise (σ ≈ 0.5 m at stable temps). At the calibration reference of 31.3°C, a 10°C rise produces ≈ 0.85 m drift — within the rolling median smoothing range for the production firmware.
+
+The heat-gun phase (>38°C) shows no consistent linear trend and significantly elevated noise (σ up to 3.4 m at 40°C), consistent with thermal stress on the SMA connections rather than a clean XOSC drift signal. Heat gun characterisation should be repeated with longer soak periods at each temperature step.
+
+### Recommendation
+
+**Calibrate at the natural CPU thermal plateau (~36°C) rather than at cold boot.** The production firmware die temp stabilises at ~44°C in field enclosures; repeat calibration when representative field enclosures are available to eliminate the residual 0.7 m systematic offset from the 31.3°C → 44°C temperature shift.
+
+---
+
 ## Outlier Gate
 
 The calibration firmware rejects ranging samples outside `m < −8.0 || m > +2.0 m`. Rejected samples are printed as `# outlier <value>` in the serial stream and excluded from mean/σ. The RESULTS line reports the count: `500 ok / 0 failed / N outlier`.
