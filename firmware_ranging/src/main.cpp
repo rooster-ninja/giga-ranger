@@ -446,7 +446,21 @@ void setup() {
 
 void loop() {
     float raw = do_ranging(true);
-    char line[160];
+    char line[192];
+
+    // BME read once per cycle — reused in DBG and ALPHA lines
+    float bme_amb   = bme_ok ? bme.readTemperature() : CAL_AMB_C;
+    float bme_hum   = bme_ok ? bme.readHumidity()    : NAN;
+    float bme_pres  = bme_ok ? bme.readPressure() / 100.0f : NAN;
+    float temp_corr = -TEMP_COEFF * (bme_amb - CAL_AMB_C);
+    float die       = temperatureRead();
+
+    char s_temp[8], s_hum[8], s_pres[10];
+    if (bme_ok) {
+        snprintf(s_temp, sizeof(s_temp), "%.1f", bme_amb);
+        snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme_hum);
+        snprintf(s_pres, sizeof(s_pres), "%.1f", bme_pres);
+    } else { strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); strcpy(s_pres, "NA"); }
 
     // Stale detection: getRangingResult() registers are only updated by the SX1280 hardware
     // on a completed exchange. Bit-identical consecutive values mean the register is stale
@@ -468,17 +482,14 @@ void loop() {
 
     uint32_t age_s = had_exchange ? (millis() - last_ok_ms) / 1000 : 99;
     {
-        char s_temp[8], s_hum[8], s_epoch[16];
-        if (bme_ok) {
-            snprintf(s_temp, sizeof(s_temp), "%.1f", bme.readTemperature());
-            snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme.readHumidity());
-        } else { strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); }
+        char s_epoch[16];
         epoch_field(s_epoch, sizeof(s_epoch));
         snprintf(line, sizeof(line),
-            "DBG,t=%lu,epoch=%s,range=%.2f,rssi=%.0f,exch=%d,link=%s,age=%lu,ok=%lu,die=%.1f,temp=%s,hum=%s\n",
+            "DBG,t=%lu,epoch=%s,range=%.2f,rssi=%.0f,exch=%d,link=%s,age=%lu,ok=%lu"
+            ",die=%.1f,temp=%s,hum=%s,corr=%+.3f\n",
             millis() / 1000, s_epoch, dbg_range, dbg_rssi, (int)exchange,
             link_ok ? "OK" : "--", (unsigned long)age_s, (unsigned long)ok_count,
-            (float)temperatureRead(), s_temp, s_hum);
+            die, s_temp, s_hum, temp_corr);
     }
     Serial.print(line);
     sd_log(line);
@@ -497,20 +508,10 @@ void loop() {
         if (outlier_filter(raw, &median)) {
             ok_count++;
 
-            float die = temperatureRead();
-            float bme_amb = bme_ok ? bme.readTemperature() : CAL_AMB_C;
-            float temp_corr = -TEMP_COEFF * (bme_amb - CAL_AMB_C);
             float corrected = median + temp_corr;
             display_range = corrected;
 
-            char s_temp[8], s_hum[8], s_pres[10], s_epoch[16];
-            if (bme_ok) {
-                snprintf(s_temp, sizeof(s_temp), "%.1f", bme_amb);
-                snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme.readHumidity());
-                snprintf(s_pres, sizeof(s_pres), "%.1f", bme.readPressure() / 100.0f);
-            } else {
-                strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); strcpy(s_pres, "NA");
-            }
+            char s_epoch[16];
             epoch_field(s_epoch, sizeof(s_epoch));
 
             Serial.printf("range=%.3f m (raw=%.3f corr=%+.3f)  rssi=%.0f  ok=%lu\n",
@@ -543,6 +544,18 @@ void loop() {
 void loop() {
     do_ranging(false);
 
+    // BME read once per cycle
+    float bme_amb   = bme_ok ? bme.readTemperature() : CAL_AMB_C;
+    float bme_hum   = bme_ok ? bme.readHumidity()    : NAN;
+    float temp_corr = -TEMP_COEFF * (bme_amb - CAL_AMB_C);
+    float die       = temperatureRead();
+
+    char s_temp[8], s_hum[8];
+    if (bme_ok) {
+        snprintf(s_temp, sizeof(s_temp), "%.1f", bme_amb);
+        snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme_hum);
+    } else { strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); }
+
     // Stale detection: SX1280 only updates packet status (rssi/snr) when an exchange
     // completes. If either value changed vs the previous cycle, an exchange happened.
     static float    prev_rssi    = 0.0f;
@@ -568,17 +581,14 @@ void loop() {
     uint32_t age_s = had_exchange ? (millis() - last_ok_ms) / 1000 : 99;
     char line[192];
     {
-        char s_temp[8], s_hum[8], s_epoch[16];
-        if (bme_ok) {
-            snprintf(s_temp, sizeof(s_temp), "%.1f", bme.readTemperature());
-            snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme.readHumidity());
-        } else { strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); }
+        char s_epoch[16];
         epoch_field(s_epoch, sizeof(s_epoch));
         snprintf(line, sizeof(line),
-            "DBG,t=%lu,epoch=%s,rssi=%.1f,snr=%.1f,exch=%d,link=%s,age=%lu,ok=%lu,die=%.1f,temp=%s,hum=%s\n",
+            "DBG,t=%lu,epoch=%s,rssi=%.1f,snr=%.1f,exch=%d,link=%s,age=%lu,ok=%lu"
+            ",die=%.1f,temp=%s,hum=%s,corr=%+.3f\n",
             millis() / 1000, s_epoch, dbg_rssi, dbg_snr, (int)exchange,
             link_ok ? "OK" : "--", (unsigned long)age_s, (unsigned long)ok_count,
-            (float)temperatureRead(), s_temp, s_hum);
+            die, s_temp, s_hum, temp_corr);
     }
     Serial.print(line);
     sd_log(line);
