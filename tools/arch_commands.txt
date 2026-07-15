@@ -53,12 +53,18 @@
   # Chimp serial (DBG + ranging data)
   pio device monitor --port /dev/ttyACM0 --baud 115200
 
-── LOG PRODUCTION FIRMWARE ──────────────────────────────────────────────────────
+── LOG RANGING OUTPUT TO CSV ──────────────────────────────────────────────────────
 
   cd ~/claude_projects/giga_ranger/firmware_ranging
 
-  pio device monitor --port /dev/ttyACM1 --baud 115200 | tee ~/Desktop/alpha_$(date +%Y%m%d_%H%M%S).log
-  pio device monitor --port /dev/ttyACM0 --baud 115200 | tee ~/Desktop/chimp_$(date +%Y%m%d_%H%M%S).log
+  # Alpha — all output (ALPHA + DBG lines). Ctrl-C to stop.
+  pio device monitor --port /dev/ttyACM1 --baud 115200 | tee ~/Desktop/ranging_alpha_$(date +%Y%m%d_%H%M%S).csv
+
+  # Chimp — DBG lines only (no ALPHA output on slave)
+  pio device monitor --port /dev/ttyACM0 --baud 115200 | tee ~/Desktop/ranging_chimp_$(date +%Y%m%d_%H%M%S).csv
+
+  # Alpha ALPHA-lines only — clean CSV with dist_m, raw_m, corr, rssi, temps:
+  pio device monitor --port /dev/ttyACM1 --baud 115200 | grep "^ALPHA" | tee ~/Desktop/ranging_alpha_$(date +%Y%m%d_%H%M%S).csv
 
 ── TEMPERATURE CHARACTERISATION EXPERIMENT ──────────────────────────────────────
 
