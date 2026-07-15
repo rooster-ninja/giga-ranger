@@ -51,7 +51,7 @@
 // ── Run parameters ────────────────────────────────────────────────────────────
 #define N_SAMPLES       500      // Wolf et al. used >1000; 500 is fast with good σ
 #define EXCHANGE_GAP_MS  20      // delay between exchanges (ms)
-#define CPU_BURN_MS     200      // busy-loop after each exchange to match production thermal load
+#define CPU_BURN_MS     400      // busy-loop after each exchange to match production thermal load
 #define TIMEOUT_MS     2000      // per-exchange timeout
 
 // Calibration table: AN1200.29 defaults — clean baseline for SF9 calibration run.
@@ -68,6 +68,9 @@ static const uint16_t CAL_TABLE[3][6] = {
 #define BME_SDA  21
 #define BME_SCL  10
 #define BME_ADDR 0x76
+
+// Continuous burn on core 0 to maximise die temp
+static void burn_core0(void *) { volatile uint32_t x = 0; while (true) x++; }
 
 SX1280 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
 Adafruit_BME280 bme;
@@ -100,6 +103,7 @@ void setup() {
     Serial.begin(115200);
     delay(3000);
 
+    xTaskCreatePinnedToCore(burn_core0, "burn0", 1024, nullptr, 1, nullptr, 0);
     Wire1.begin(BME_SDA, BME_SCL);
     bme_ok = bme.begin(BME_ADDR, &Wire1);
     if (!bme_ok) bme_ok = bme.begin(0x77, &Wire1);
