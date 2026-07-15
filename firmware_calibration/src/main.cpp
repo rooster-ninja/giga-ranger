@@ -74,7 +74,7 @@ static void burn_core0(void *) {
     volatile uint32_t x = 0;
     while (true) {
         for (int i = 0; i < 50000; i++) x++;
-        taskYIELD();  // let idle task reset watchdog
+        vTaskDelay(1);  // 1ms sleep — lets idle task reset watchdog
     }
 }
 
