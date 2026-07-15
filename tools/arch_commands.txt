@@ -1,0 +1,102 @@
+================================================================================
+  GIGA RANGER — ARCH LAPTOP COMMANDS
+  ACM1 = Alpha (master)   ACM0 = Chimp (slave)
+================================================================================
+
+── FIND USB PORTS ───────────────────────────────────────────────────────────────
+
+  ls /dev/ttyACM*
+
+── MONITOR (no logging) ─────────────────────────────────────────────────────────
+
+  # Alpha
+  pio device monitor --port /dev/ttyACM1 --baud 115200
+
+  # Chimp
+  pio device monitor --port /dev/ttyACM0 --baud 115200
+
+── LOG TO CSV (calibration runs) ────────────────────────────────────────────────
+
+  # Alpha — run from firmware_calibration directory
+  cd ~/claude_projects/giga_ranger/firmware_calibration
+  pio device monitor --port /dev/ttyACM1 --baud 115200 | tee ~/Desktop/master_$(date +%Y%m%d_%H%M%S).csv
+
+  # Chimp — separate terminal
+  cd ~/claude_projects/giga_ranger/firmware_calibration
+  pio device monitor --port /dev/ttyACM0 --baud 115200 | tee ~/Desktop/slave_$(date +%Y%m%d_%H%M%S).csv
+
+── FLASH CALIBRATION FIRMWARE ───────────────────────────────────────────────────
+
+  cd ~/claude_projects/giga_ranger/firmware_calibration
+
+  # Flash Alpha (master)
+  pio run -e master -t upload --upload-port /dev/ttyACM1
+
+  # Flash Chimp (slave)
+  pio run -e slave -t upload --upload-port /dev/ttyACM0
+
+── FLASH PRODUCTION FIRMWARE ────────────────────────────────────────────────────
+
+  cd ~/claude_projects/giga_ranger/firmware_ranging
+
+  # Flash Alpha
+  pio run -e alpha -t upload --upload-port /dev/ttyACM1
+
+  # Flash Chimp
+  pio run -e chimp -t upload --upload-port /dev/ttyACM0
+
+── MONITOR PRODUCTION FIRMWARE ──────────────────────────────────────────────────
+
+  # Alpha serial (BLE output goes to phone, serial = DBG lines only)
+  pio device monitor --port /dev/ttyACM1 --baud 115200
+
+  # Chimp serial (DBG + ranging data)
+  pio device monitor --port /dev/ttyACM0 --baud 115200
+
+── LOG PRODUCTION FIRMWARE ──────────────────────────────────────────────────────
+
+  cd ~/claude_projects/giga_ranger/firmware_ranging
+
+  pio device monitor --port /dev/ttyACM1 --baud 115200 | tee ~/Desktop/alpha_$(date +%Y%m%d_%H%M%S).log
+  pio device monitor --port /dev/ttyACM0 --baud 115200 | tee ~/Desktop/chimp_$(date +%Y%m%d_%H%M%S).log
+
+── TEMPERATURE CHARACTERISATION EXPERIMENT ──────────────────────────────────────
+
+  Flash calibration firmware to both units first (see above).
+  Open two terminals side by side.
+
+  Terminal 1 (Alpha / master):
+    cd ~/claude_projects/giga_ranger/firmware_calibration
+    pio device monitor --port /dev/ttyACM1 --baud 115200 | tee ~/Desktop/master_$(date +%Y%m%d_%H%M%S).csv
+
+  Terminal 2 (Chimp / slave):
+    cd ~/claude_projects/giga_ranger/firmware_calibration
+    pio device monitor --port /dev/ttyACM0 --baud 115200 | tee ~/Desktop/slave_$(date +%Y%m%d_%H%M%S).csv
+
+  Run sequence:
+    Step 1 — COLD:  place units in chilled environment (~3-4°C). Wait for BME amb_c to
+                    stabilise. Hold 5 min.
+    Step 2 — WARM:  bring to ambient (~25-27°C). Wait for BME amb_c to stabilise.
+                    Hold 5 min.
+    Step 3 — HOT:   place under warming lights (~40°C ambient). Wait for BME amb_c to
+                    stabilise. Hold 5 min.
+
+  Note the approximate t_ms at the start of each stable window — BME amb_c column
+  in the CSV confirms stability. Ctrl-C to stop both loggers when done.
+
+── COPY CSV FILES TO MAC ────────────────────────────────────────────────────────
+
+  # From Mac terminal — pulls files from Arch laptop (replace ARCH_IP)
+  scp user@ARCH_IP:~/Desktop/master_*.csv ~/claude_projects/giga_ranger/Assets/
+  scp user@ARCH_IP:~/Desktop/slave_*.csv  ~/claude_projects/giga_ranger/Assets/
+
+── GIT ──────────────────────────────────────────────────────────────────────────
+
+  cd ~/claude_projects/giga_ranger
+  git status
+  git pull
+  git add -p
+  git commit -m "message"
+  git push
+
+================================================================================
