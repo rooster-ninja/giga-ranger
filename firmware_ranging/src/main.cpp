@@ -70,6 +70,14 @@ static const uint16_t CAL_TABLE[3][6] = {
 #define DELTA_GATE_M  500.0f    // reject if > ±500 m from last valid (tighten after field test)
 #define MEDIAN_N      5
 
+// ── Temperature correction ────────────────────────────────────────────────────
+// Derived from Operation Icebox 2026-07-15: continuous cold→hot→ambient run.
+// Variable: BME280 ambient (not die temp). Coefficient: +0.0665 m/°C.
+// corrected = median - TEMP_COEFF * (bme_amb - CAL_AMB_C)
+// Update CAL_AMB_C to the actual BME ambient reading at calibration time.
+#define TEMP_COEFF   0.0665f   // m/°C — Operation Icebox 2026-07-15
+#define CAL_AMB_C    22.0f     // °C   — BME ambient at calibration; update after each cal run
+
 // ── BLE NUS UUIDs (Nordic UART Service, standard) ────────────────────────────
 #define NUS_SERVICE_UUID  "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define NUS_RX_UUID       "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -488,12 +496,16 @@ void loop() {
         float median;
         if (outlier_filter(raw, &median)) {
             ok_count++;
-            display_range = median;
 
             float die = temperatureRead();
+            float bme_amb = bme_ok ? bme.readTemperature() : CAL_AMB_C;
+            float temp_corr = -TEMP_COEFF * (bme_amb - CAL_AMB_C);
+            float corrected = median + temp_corr;
+            display_range = corrected;
+
             char s_temp[8], s_hum[8], s_pres[10], s_epoch[16];
             if (bme_ok) {
-                snprintf(s_temp, sizeof(s_temp), "%.1f", bme.readTemperature());
+                snprintf(s_temp, sizeof(s_temp), "%.1f", bme_amb);
                 snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme.readHumidity());
                 snprintf(s_pres, sizeof(s_pres), "%.1f", bme.readPressure() / 100.0f);
             } else {
@@ -501,13 +513,13 @@ void loop() {
             }
             epoch_field(s_epoch, sizeof(s_epoch));
 
-            Serial.printf("range=%.1f m  rssi=%.0f  ok=%lu\n",
-                median, display_rssi, (unsigned long)ok_count);
+            Serial.printf("range=%.3f m (raw=%.3f corr=%+.3f)  rssi=%.0f  ok=%lu\n",
+                corrected, median, temp_corr, display_rssi, (unsigned long)ok_count);
 
             snprintf(line, sizeof(line),
-                "ALPHA,t=%lu,epoch=%s,dist_m=%.1f,rssi=%.0f"
+                "ALPHA,t=%lu,epoch=%s,dist_m=%.3f,raw_m=%.3f,corr=%+.3f,rssi=%.0f"
                 ",die=%.1f,temp=%s,hum=%s,pres=%s,ok=%lu,rej=%lu\n",
-                millis() / 1000, s_epoch, median, display_rssi,
+                millis() / 1000, s_epoch, corrected, median, temp_corr, display_rssi,
                 die, s_temp, s_hum, s_pres,
                 (unsigned long)ok_count, (unsigned long)rej_count);
             ble_send(line);
