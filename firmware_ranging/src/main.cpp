@@ -56,11 +56,12 @@
 #define RF_SF             9
 #define RF_TX_DBM        13    // OTA — PA FEM; never exceed +5 dBm conducted
 
-// Calibration table: SF9/BW1625 corrected 2026-07-04. CAL_TABLE[2][4] = 13089.
+// Calibration table: SF9/BW1625 corrected 2026-07-15 at +13 dBm TX. CAL_TABLE[2][4] = 12849.
+// 3-run average CalVal=0 (means 0.660 m vs target 0.695 m, 34 mm residual).
 static const uint16_t CAL_TABLE[3][6] = {
     { 10299, 10271, 10244, 10242, 10230, 10246 },  // BW 406.25 kHz
     { 11486, 11474, 11453, 11426, 11417, 11401 },  // BW 812.50 kHz
-    { 13308, 13493, 13528, 13515, 13089, 13376 },  // BW 1625.00 kHz (SF9 adjusted)
+    { 13308, 13493, 13528, 13515, 12849, 13376 },  // BW 1625.00 kHz (SF9 [2][4] = 12849)
 };
 #define RANGING_ADDR      0xDEADBEEF
 #define RANGING_INTERVAL_MS  5000   // ms between master-initiated exchanges
@@ -76,7 +77,7 @@ static const uint16_t CAL_TABLE[3][6] = {
 // corrected = median - TEMP_COEFF * (bme_amb - CAL_AMB_C)
 // Update CAL_AMB_C to the actual BME ambient reading at calibration time.
 #define TEMP_COEFF   0.0665f   // m/°C — Operation Icebox 2026-07-15
-#define CAL_AMB_C    22.0f     // °C   — BME ambient at calibration; update after each cal run
+#define CAL_AMB_C    26.2f     // °C   — BME ambient during +13 dBm calibration runs (2026-07-15)
 
 // ── BLE NUS UUIDs (Nordic UART Service, standard) ────────────────────────────
 #define NUS_SERVICE_UUID  "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"

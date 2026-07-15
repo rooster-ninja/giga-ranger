@@ -313,6 +313,47 @@
   .budget .budget-row .v.neg { color: #e07070; }
   .budget .budget-row .v.margin { color: var(--warn); font-weight: 700; font-size: 1rem; }
 
+  /* ── Photo pair (calibration / hotbox) ── */
+  .photo-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 1.25rem;
+  }
+
+  .photo-pair figure {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .photo-pair img {
+    width: 100%;
+    height: 240px;
+    object-fit: cover;
+    display: block;
+  }
+
+  .photo-pair figcaption {
+    padding: 0.6rem 0.9rem;
+    font-size: 0.78rem;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  @media (max-width: 600px) {
+    .photo-pair { grid-template-columns: 1fr; }
+  }
+
+  /* ── Calibration result table ── */
+  .cal-table td:first-child { width: 12%; text-align: center; }
+  .cal-table td:nth-child(2) { width: 18%; }
+  .cal-table td:nth-child(3) { width: 14%; text-align: center; }
+  .cal-table td:nth-child(4) { width: 14%; text-align: center; }
+  .cal-table td.invalid { color: #e07070; }
+  .cal-table td.ok { color: var(--accent2); }
+
   /* ── Footer ── */
   footer {
     text-align: center;
@@ -574,6 +615,128 @@
         <tr><td>CSB</td><td>3V3</td><td>Holds device in I²C mode</td></tr>
       </tbody>
     </table>
+  </section>
+
+  <!-- Temperature characterisation & calibration -->
+  <section>
+    <h2>Temperature Characterisation &amp; Calibration</h2>
+    <p>
+      The SX1280 ranging result drifts with temperature. Before field deployment the system
+      underwent two dedicated laboratory procedures: a thermal characterisation run to quantify
+      and correct for this drift, followed by a bench calibration at known distance to lock in
+      the hardware calibration register.
+    </p>
+
+    <div class="photo-pair">
+      <figure>
+        <img src="assets/hotbox-setup.jpg" alt="Thermal hot-box test — two infrared heat lamps illuminating both nodes on a workbench">
+        <figcaption>Thermal hot-box — infrared heat lamps heating both nodes simultaneously during Operation Icebox</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/bme-sensor-live.jpg" alt="T3-S3 board running production firmware with BME280 sensor connected, OLED showing live T/H/P readings">
+        <figcaption>Production firmware running live — OLED shows Link OK, 7.5 m ranging, temperature, humidity and pressure from BME280</figcaption>
+      </figure>
+    </div>
+
+    <h3>Step 1 — Operation Icebox: Thermal Characterisation</h3>
+    <p>
+      Both nodes were subjected to a controlled cold-to-hot thermal cycle while logging ranging
+      results and BME280 ambient temperature continuously. The sequence was:
+      <strong>cold soak</strong> (fridge, ~4 °C ambient, stabilised 15 min) →
+      <strong>heat-lamp phase</strong> (two infrared lamps, up to 34 °C ambient) →
+      <strong>natural cool-down</strong> to room temperature. Alpha and Chimp were heated
+      simultaneously; Chimp was pulled early when die temperature hit 50 °C.
+    </p>
+    <p>
+      Linear regression of ranging result vs BME280 ambient temperature yielded a coefficient
+      of <strong>+0.0665 m/°C</strong> (R² = 0.16). The low R² reflects the high per-sample
+      noise of the ranging engine rather than a poor fit — the per-bin trend is visually clear.
+      Both die temperature and ambient temperature were evaluated; ambient (BME280) gave a
+      tighter and more physically interpretable correction since it tracks the RF environment
+      rather than CPU self-heating.
+    </p>
+    <p>
+      This correction is applied in real-time in the production firmware:
+    </p>
+    <table>
+      <thead><tr><th>Constant</th><th>Value</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>TEMP_COEFF</td><td>+0.0665 m/°C</td><td>Ranging drift per degree of BME ambient change</td></tr>
+        <tr><td>CAL_AMB_C</td><td>26.2 °C</td><td>BME ambient at calibration time — correction is zero at this temperature</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top:0.9rem;">
+      For every ALPHA output line: <code>corrected = median − 0.0665 × (bme_amb − 26.2)</code>.
+      Both the raw median and the corrected distance are logged to SD, BLE, and serial so the
+      correction can be validated post-hoc.
+    </p>
+
+    <h3 style="margin-top:1.5rem;">Step 2 — Bench Calibration at Known Distance</h3>
+    <p>
+      Per AN1200.29, the SX1280 calibration register must be set with the radio operating at
+      the exact same TX power, frequency, bandwidth, and spreading factor as production. The
+      bench reference path was: <strong>40 dB attenuator → 1 m RG-316 coax → 40 dB attenuator</strong>,
+      giving an electrical path length of 0.695 m (velocity factor 0.695, MIL-DTL-17 spec).
+      TX power was fixed at +13 dBm to match production; the 80 dB total attenuation places
+      the received signal at approximately −27 dBm, well within the linear range.
+    </p>
+    <p>
+      The master node ran 500-sample SPACE-triggered bursts. For each burst the mean, σ, and
+      CalVal are computed: <code>CalVal = (mean − 0.695) / 0.1803</code>, where 0.1803 m is
+      the distance resolution per ranging count. The calibration table entry CAL_TABLE[2][4]
+      (SF9, BW 1625 kHz) was adjusted iteratively until CalVal converged to zero.
+    </p>
+    <table class="cal-table">
+      <thead>
+        <tr><th>Run</th><th>Mean (m)</th><th>CalVal</th><th>σ (m)</th><th>Outliers</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td>0.2934</td><td class="ok">−2</td><td>0.619</td><td>0</td><td>Valid</td></tr>
+        <tr><td>2</td><td>0.8915</td><td class="ok">+1</td><td>0.681</td><td>0</td><td>Valid</td></tr>
+        <tr><td>3</td><td>0.7967</td><td class="ok">+1</td><td>0.538</td><td>0</td><td>Valid</td></tr>
+        <tr><td>4</td><td>0.6192</td><td class="ok">0</td><td>0.525</td><td>22</td><td>Valid (outliers at −44.7 m, caught)</td></tr>
+        <tr><td>5</td><td>−0.042</td><td class="invalid">−4</td><td>4.016</td><td>0</td><td class="invalid">Invalid — −18.46 m error values inside old ±20 m gate</td></tr>
+        <tr><td>6</td><td>0.6379</td><td class="ok">0</td><td>0.746</td><td>22</td><td>Valid (outliers at −25.3 m, caught)</td></tr>
+        <tr style="font-weight:600"><td>Avg</td><td>0.648</td><td class="ok">0</td><td>—</td><td>—</td><td>Runs 1–4, 6</td></tr>
+      </tbody>
+    </table>
+    <div class="note" style="margin-top:1.25rem;">
+      <strong>Result:</strong> CAL_TABLE[2][4] = <strong>12849</strong>, anchored to BME ambient
+      26.2 °C. Five-run mean of 0.648 m vs target 0.695 m — 47 mm residual, well within one
+      ranging count (180 mm). The outlier values (−44.7, −25.3 m) are SX1280 error register
+      codes; the ±20 m gate catches those that fall outside ±20 m. The −18.5 m values in Run 5
+      slipped through, invalidating that run; the calibration firmware outlier gate has since
+      been tightened to ±5 m for future runs.
+    </div>
+    <p style="margin-top:0.9rem;">
+      Per-sample σ of 0.5–0.7 m is expected at +13 dBm in a bench near-field setup
+      (3× higher than at −18 dBm) — the ranging engine is designed for far-field use.
+      The multi-run averaging approach compensates: with 500 samples the standard error
+      of the mean is σ/√500 ≈ 25–30 mm, giving a well-determined calibration point.
+    </p>
+
+    <h3 style="margin-top:1.5rem;">Static Range Measurement Procedure</h3>
+    <p>
+      With both Alpha and Chimp static at known reference sites, a <em>survey-grade</em>
+      static measurement session replaces the calibration burst. The production firmware
+      logs every ALPHA line to the SD card continuously. For a proper baseline:
+    </p>
+    <table>
+      <thead><tr><th>Session length</th><th>Approx. samples</th><th>Mean σ</th></tr></thead>
+      <tbody>
+        <tr><td>10 minutes</td><td>~120</td><td>~55 mm</td></tr>
+        <tr><td>30 minutes</td><td>~360</td><td>~32 mm</td></tr>
+        <tr><td>60 minutes</td><td>~720</td><td>~23 mm</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top:0.9rem;">
+      Pull the SD CSV after the session and compute <code>mean(dist_m)</code> over all rows
+      (or <code>raw_m</code> if you want uncorrected). The 5-sample rolling median already
+      displayed on the OLED is a real-time quality check, not a survey result — use the
+      logged mean. A 500-sample calibration-style burst is also a clean option if you want
+      a quick spot-check rather than a long session; the calibration firmware can be re-used
+      at any reference distance for this purpose.
+    </p>
   </section>
 
   <!-- Install notes -->
