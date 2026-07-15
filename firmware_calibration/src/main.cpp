@@ -29,9 +29,9 @@
 #define CAL_FREQ_MHZ  2450.0f
 #define CAL_BW_KHZ    1625.0f
 #define CAL_SF            9
-#define CAL_TX_DBM      -18     // -18 dBm = SX1280 minimum; required when only one 40 dB atten available
-                                // (-18 dBm - 40 dB = -58 dBm at RX, within linear range)
-                                // WARNING: board has PA FEM — never exceed +5 dBm
+#define CAL_TX_DBM       13     // Must match RF_TX_DBM in production firmware exactly.
+                                // (13 dBm - 40 dB atten = -27 dBm at RX — within linear range)
+                                // WARNING: board has PA FEM — never exceed +5 dBm conducted
 
 // Ranging address — must match on both boards
 #define RANGING_ADDR  0xDEADBEEF
@@ -60,7 +60,7 @@
 static const uint16_t CAL_TABLE[3][6] = {
     { 10299, 10271, 10244, 10242, 10230, 10246 },
     { 11486, 11474, 11453, 11426, 11417, 11401 },
-    { 13308, 13493, 13528, 13515, 13430, 13376 },  // SF9 [2][4]: AN1200.29 default — uncalibrated starting point
+    { 13308, 13493, 13528, 13515, 13430, 13376 },  // SF9 [2][4] = 13430: AN1200.29 default — starting point
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
