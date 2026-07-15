@@ -70,7 +70,13 @@ static const uint16_t CAL_TABLE[3][6] = {
 #define BME_ADDR 0x76
 
 // Continuous burn on core 0 to maximise die temp
-static void burn_core0(void *) { volatile uint32_t x = 0; while (true) x++; }
+static void burn_core0(void *) {
+    volatile uint32_t x = 0;
+    while (true) {
+        for (int i = 0; i < 50000; i++) x++;
+        taskYIELD();  // let idle task reset watchdog
+    }
+}
 
 SX1280 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
 Adafruit_BME280 bme;
