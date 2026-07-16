@@ -557,17 +557,14 @@ void loop() {
         snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme_hum);
     } else { strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); }
 
-    // Stale detection: SX1280 only updates packet status (rssi/snr) when an exchange
-    // completes. If either value changed vs the previous cycle, an exchange happened.
-    static float    prev_rssi    = 0.0f;
-    static float    prev_snr     = 0.0f;
+    // DIO1-based exchange detection: dbg_isr is true when DIO1 fired (slave received +
+    // responded to a ranging request). More reliable than RSSI/SNR change detection,
+    // which fails when signal is constant (e.g. stable free-air path at bench).
     static uint32_t last_ok_ms   = 0;
     static bool     had_exchange = false;
 
-    bool exchange = (g_rssi != prev_rssi || g_snr != prev_snr);
+    bool exchange = dbg_isr;
     if (exchange) {
-        prev_rssi    = g_rssi;
-        prev_snr     = g_snr;
         last_ok_ms   = millis();
         had_exchange = true;
         ok_count++;
