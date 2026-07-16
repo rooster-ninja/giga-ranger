@@ -33,34 +33,39 @@ SCRIPT_DIR  = Path(__file__).resolve().parent
 FW_DIR      = SCRIPT_DIR.parent / "firmware_calibration"
 FW_SRC      = FW_DIR / "src" / "main.cpp"
 
-# Prior collected data points (cal, mean_m) from earlier sessions.
-# Seeds the bracketing interpolation from the first iteration.
+# Seed data — new slave firmware only (no CPU burn on slave).
+# Old-slave data is INVALID (stale reads inflated those means by ~8 m); do not use.
 SEED_DATA: list[tuple[int, float]] = [
-    (12995, 12.729),
-    (13266,  7.472),
-    (13345,  5.474),
-    (13379,  4.692),
-    (13397,  3.927),
-    (13430, -6.598),
+    (13404, -4.4004),   # clean run, sigma=0.68 m, new slave firmware
 ]
+
+# Chimp empirical sensitivity: 1 cal count ≈ 0.04444 m change in reading.
+METERS_PER_COUNT_CHIMP = 0.04444
 
 
 def set_cal(val: int) -> None:
     src = FW_SRC.read_text()
-    # Replace the 5th element of the SF9 row: { 13308, 13493, 13528, 13515, XXXXX, 13376 }
+    # Match SF9 row by its trailing element 13376 — flexible about all other values/spacing
     new_src = re.sub(
-        r'(\{ 13308, 13493, 13528, 13515, )\d+(, 13376 \})',
+        r'(\{\s*\d+,\s*\d+,\s*\d+,\s*\d+,\s*)\d+(\s*,\s*13376\s*\})',
         rf'\g<1>{val}\g<2>',
         src,
     )
     # Keep the inline comment accurate
     new_src = re.sub(
-        r'(// SF9 \[2\]\[4\] = )\d+',
+        r'(\[2\]\[4\]\s*=\s*)\d+',
         rf'\g<1>{val}',
         new_src,
     )
-    if new_src == src:
-        raise RuntimeError("CAL_TABLE pattern not found in main.cpp — check regex")
+    # Verify pattern exists (substitution may be a no-op if val already matches current value)
+    if not re.search(r'\{\s*\d+,\s*\d+,\s*\d+,\s*\d+,\s*\d+\s*,\s*13376\s*\}', src):
+        for line in src.splitlines():
+            if "13376" in line or "SF9" in line:
+                print(f"  [debug] {repr(line)}")
+        raise RuntimeError(
+            f"CAL_TABLE pattern not found in {FW_SRC}\n"
+            "Expected a 6-element array row ending with 13376."
+        )
     FW_SRC.write_text(new_src)
     print(f"[fw]  CAL_TABLE[2][4] = {val}")
 
@@ -113,24 +118,25 @@ def run_sample(port: str) -> tuple[float, float]:
     return float(m.group(1)), float(s.group(1))
 
 
-def interpolate(data: list[tuple[int, float]], target: float) -> int:
+def interpolate(data: list[tuple[int, float]], target: float) -> int | None:
     """
-    Linear interpolation/extrapolation between the two data points that
-    most tightly bracket the target mean.  Falls back to the two nearest
-    points when no bracket exists.
+    Linear interpolation between the tightest bracket straddling the target.
+    Returns None when no valid bracket exists (all points on same side).
     """
-    pts = sorted(set(data))   # unique, ascending by cal
+    # Deduplicate by cal: keep the most recent measurement for each cal value.
+    by_cal: dict[int, float] = {}
+    for c, m in data:
+        by_cal[c] = m   # later entries overwrite earlier ones
+    pts = sorted(by_cal.items())   # ascending by cal
 
-    above = [(c, m) for c, m in pts if m >= target]  # mean too high → cal too low
-    below = [(c, m) for c, m in pts if m < target]   # mean too low  → cal too high
+    above = [(c, m) for c, m in pts if m >= target]
+    below = [(c, m) for c, m in pts if m < target]
 
-    if above and below:
-        c0, m0 = max(above, key=lambda x: x[0])  # highest cal still reading > target
-        c1, m1 = min(below, key=lambda x: x[0])  # lowest  cal already reading < target
-    elif above:
-        (c0, m0), (c1, m1) = pts[-1], pts[-2]
-    else:
-        (c0, m0), (c1, m1) = pts[0], pts[1]
+    if not (above and below):
+        return None   # no bracket yet
+
+    c0, m0 = max(above, key=lambda x: x[0])  # highest cal still reading > target
+    c1, m1 = min(below, key=lambda x: x[0])  # lowest cal already reading < target
 
     if m0 == m1:
         return (c0 + c1) // 2
@@ -145,7 +151,7 @@ def main() -> None:
                     help="Serial port for Chimp (master)")
     ap.add_argument("--pio", default="pio",
                     help="Path to pio executable, e.g. ~/.local/bin/pio")
-    ap.add_argument("--start-cal", type=int, default=13415,
+    ap.add_argument("--start-cal", type=int, default=13289,
                     help="Starting CAL_TABLE[2][4] value")
     args = ap.parse_args()
 
@@ -184,6 +190,12 @@ def main() -> None:
             return
 
         next_cal = interpolate(history, TARGET_M)
+
+        if next_cal is None:
+            # No bracket yet — use empirical Chimp factor to step toward target.
+            # Higher cal → lower reading (negative slope), so negative error → lower cal.
+            delta = round(err / METERS_PER_COUNT_CHIMP)
+            next_cal = cal - delta   # err negative → delta negative → cal decreases
 
         # Guard: never suggest the same value we just measured
         if next_cal == cal:
