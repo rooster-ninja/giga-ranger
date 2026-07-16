@@ -49,18 +49,18 @@
 #define METERS_PER_COUNT  0.1803f  // SF9, BW=1625 kHz: c/(2×1625000×2^9)
 
 // ── Run parameters ────────────────────────────────────────────────────────────
-#define N_SAMPLES       500      // Wolf et al. used >1000; 500 is fast with good σ
+#define N_SAMPLES       100
 #define EXCHANGE_GAP_MS  20      // delay between exchanges (ms)
 #define CPU_BURN_MS     400      // busy-loop after each exchange to match production thermal load
 #define TIMEOUT_MS     2000      // per-exchange timeout
 
-// Calibration table: AN1200.29 defaults — clean baseline for SF9 calibration run.
-// Row 0 = BW 406.25, Row 1 = BW 812.50, Row 2 = BW 1625. Columns = SF5–SF10.
-// SF9 entry = [2][4] = 13430. Adjust this value iteratively until mean ≈ CABLE_ELEC_M.
+// Calibration table: AN1200.89 factory baseline. SF9/BW1625 = [2][4] = 13430.
+// Compensates for SX1280 internal processing latency. Adjust [2][4] iteratively
+// until mean ≈ CABLE_ELEC_M (0.695 m). Formula: new_cal = old_cal + CalVal × 8.06
 static const uint16_t CAL_TABLE[3][6] = {
     { 10299, 10271, 10244, 10242, 10230, 10246 },
     { 11486, 11474, 11453, 11426, 11417, 11401 },
-    { 13308, 13493, 13528, 13515, 12849, 13376 },  // SF9 [2][4] = 12849: iteration 1 at +13 dBm TX
+    { 13308, 13493, 13528, 13515, 13415, 13376 },  // SF9 [2][4] = 13415: Chimp as master (bracketing interp)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -102,7 +102,9 @@ float do_ranging(bool master) {
     unsigned long t0 = millis();
     while (!isr_fired && millis() - t0 < 300) yield();
 
-    return radio.getRangingResult();
+    float result = radio.getRangingResult();
+    if (result == 0.0f) return NAN;  // discard uninitialized register (startup artifact)
+    return result;
 }
 
 void setup() {
@@ -158,7 +160,7 @@ void setup() {
             unsigned long t = millis();
 
             if (!isnan(m)) {
-                if (m < -5.0f || m > 5.0f) {
+                if (m < -100.0f || m > 2000.0f) {
                     Serial.printf("# outlier %.4f die=%.1f\n", m, die);
                     outlier++;
                 } else {
@@ -208,7 +210,9 @@ void setup() {
 void loop() {
 #ifndef CAL_MASTER
     do_ranging(false);
-    { volatile uint32_t x = 0; uint32_t t0 = millis(); while (millis() - t0 < CPU_BURN_MS) x++; }
+    // No CPU burn on slave — slave must cycle at ~350 ms so it is always in RX
+    // when the master fires its 300 ms ranging window.  Master and slave at equal
+    // burn times (~720 ms each) phase-lock and produce long runs of stale reads.
     float die = (float)temperatureRead();
     float amb = bme_ok ? bme.readTemperature() : NAN;
     if (isnan(amb))
