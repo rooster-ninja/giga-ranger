@@ -60,7 +60,7 @@
 static const uint16_t CAL_TABLE[3][6] = {
     { 10299, 10271, 10244, 10242, 10230, 10246 },
     { 11486, 11474, 11453, 11426, 11417, 11401 },
-    { 13308, 13493, 13528, 13515, 13415, 13376 },  // SF9 [2][4] = 13415: Chimp as master (bracketing interp)
+    { 13308, 13493, 13528, 13515, 13229, 13376 },  // SF9 [2][4] = 13229: Alpha (was Chimp) as master — calibrated 2026-07-16
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -136,68 +136,49 @@ void setup() {
     radio.setDio1Action(onDio1);
 
 #ifdef CAL_MASTER
-    // ── MASTER — SPACE-triggered 500-sample runs ──────────────────────────────
+    // ── MASTER — free-run, no sample limit (temperature calibration) ───────────
     Serial.println("Role: MASTER (Alpha)");
-    Serial.printf("Cable: %.4f m electrical  |  N_SAMPLES=%d\n", CABLE_ELEC_M, N_SAMPLES);
+    Serial.printf("Cable: %.4f m electrical  CAL=%d\n", CABLE_ELEC_M, CAL_TABLE[2][4]);
+    Serial.println("t_ms,raw_m,die_c,amb_c");
 
-    int run = 0;
+    double sum = 0.0, sum_sq = 0.0;
+    int ok = 0, err = 0, outlier = 0;
+
     while (true) {
-        run++;
-        Serial.printf("\n# Run %d — press SPACE to start\n", run);
-        while (true) {
-            if (Serial.available() && Serial.read() == ' ') break;
-            delay(50);
-        }
+        float m   = do_ranging(true);
+        float die = (float)temperatureRead();
+        float amb = bme_ok ? bme.readTemperature() : NAN;
+        unsigned long t = millis();
 
-        Serial.println("t_ms,raw_m,die_c,amb_c");
-        double sum = 0.0, sum_sq = 0.0;
-        int ok = 0, err = 0, outlier = 0;
-
-        while (ok < N_SAMPLES) {
-            float m   = do_ranging(true);
-            float die = (float)temperatureRead();
-            float amb = bme_ok ? bme.readTemperature() : NAN;
-            unsigned long t = millis();
-
-            if (!isnan(m)) {
-                if (m < -100.0f || m > 2000.0f) {
-                    Serial.printf("# outlier %.4f die=%.1f\n", m, die);
-                    outlier++;
-                } else {
-                    if (isnan(amb))
-                        Serial.printf("%lu,%.4f,%.1f,NA\n", t, m, die);
-                    else
-                        Serial.printf("%lu,%.4f,%.1f,%.2f\n", t, m, die, amb);
-                    sum    += m;
-                    sum_sq += (double)m * m;
-                    ok++;
-                }
+        if (!isnan(m)) {
+            if (m < -100.0f || m > 2000.0f) {
+                Serial.printf("# outlier %.4f die=%.1f\n", m, die);
+                outlier++;
             } else {
-                Serial.printf("# timeout t=%lu\n", t);
-                err++;
+                if (isnan(amb))
+                    Serial.printf("%lu,%.4f,%.1f,NA\n", t, m, die);
+                else
+                    Serial.printf("%lu,%.4f,%.1f,%.2f\n", t, m, die, amb);
+                sum    += m;
+                sum_sq += (double)m * m;
+                ok++;
             }
-
-            if (ok > 0 && ok % 100 == 0) {
-                double mean_m  = sum / ok;
-                double var     = (sum_sq / ok) - (mean_m * mean_m);
-                double sigma_m = sqrt(var < 0.0 ? 0.0 : var);
-                float  cal_val = (float)((mean_m - CABLE_ELEC_M) / METERS_PER_COUNT);
-                Serial.printf("# [n=%d] mean=%.4f m  sigma=%.4f m  die=%.1f C  CalVal=%.0f\n",
-                    ok, mean_m, sigma_m, die, cal_val);
-            }
-
-            delay(EXCHANGE_GAP_MS);
-            { volatile uint32_t x = 0; uint32_t t0 = millis(); while (millis() - t0 < CPU_BURN_MS) x++; }
+        } else {
+            Serial.printf("# timeout t=%lu\n", t);
+            err++;
         }
 
-        double mean_m  = sum / ok;
-        double var     = (sum_sq / ok) - (mean_m * mean_m);
-        double sigma_m = sqrt(var < 0.0 ? 0.0 : var);
-        float  cal_val = (float)((mean_m - CABLE_ELEC_M) / METERS_PER_COUNT);
-        Serial.printf("\n# RESULT run=%d  mean=%.4f m  sigma=%.4f m  die=%.1f C"
-                      "  CalVal=%.0f  ok=%d  outlier=%d  err=%d\n",
-            run, mean_m, sigma_m, (float)temperatureRead(),
-            cal_val, ok, outlier, err);
+        if (ok > 0 && ok % 100 == 0) {
+            double mean_m  = sum / ok;
+            double var     = (sum_sq / ok) - (mean_m * mean_m);
+            double sigma_m = sqrt(var < 0.0 ? 0.0 : var);
+            float  cal_val = (float)((mean_m - CABLE_ELEC_M) / METERS_PER_COUNT);
+            Serial.printf("# [n=%d] mean=%.4f m  sigma=%.4f m  die=%.1f C  CalVal=%.0f\n",
+                ok, mean_m, sigma_m, die, cal_val);
+        }
+
+        delay(EXCHANGE_GAP_MS);
+        { volatile uint32_t x = 0; uint32_t t0 = millis(); while (millis() - t0 < CPU_BURN_MS) x++; }
     }
 
 #else

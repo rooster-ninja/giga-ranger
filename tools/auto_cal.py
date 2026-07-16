@@ -35,9 +35,7 @@ FW_SRC      = FW_DIR / "src" / "main.cpp"
 
 # Seed data — new slave firmware only (no CPU burn on slave).
 # Old-slave data is INVALID (stale reads inflated those means by ~8 m); do not use.
-SEED_DATA: list[tuple[int, float]] = [
-    (13404, -4.4004),   # clean run, sigma=0.68 m, new slave firmware
-]
+SEED_DATA: list[tuple[int, float]] = []  # populated per-board via --start-cal
 
 # Theoretical sensitivity: 150 / (4.096 × 1625) = 0.02253 m/count.
 # BW=1625 confirmed in both firmware and RadioLib's setBandwidth().
