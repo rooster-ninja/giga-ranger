@@ -39,8 +39,10 @@ SEED_DATA: list[tuple[int, float]] = [
     (13404, -4.4004),   # clean run, sigma=0.68 m, new slave firmware
 ]
 
-# Chimp empirical sensitivity: 1 cal count ≈ 0.04444 m change in reading.
-METERS_PER_COUNT_CHIMP = 0.04444
+# Theoretical sensitivity: 150 / (4.096 × 1625) = 0.02253 m/count.
+# BW=1625 confirmed in both firmware and RadioLib's setBandwidth().
+# Previous empirical 0.04444 was an artifact of stale slave data inflating means.
+METERS_PER_COUNT_CHIMP = 0.02253
 
 
 def set_cal(val: int) -> None:
@@ -151,7 +153,7 @@ def main() -> None:
                     help="Serial port for Chimp (master)")
     ap.add_argument("--pio", default="pio",
                     help="Path to pio executable, e.g. ~/.local/bin/pio")
-    ap.add_argument("--start-cal", type=int, default=13289,
+    ap.add_argument("--start-cal", type=int, default=13178,
                     help="Starting CAL_TABLE[2][4] value")
     args = ap.parse_args()
 
