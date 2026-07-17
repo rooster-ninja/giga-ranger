@@ -204,10 +204,11 @@ def main() -> None:
         next_cal = interpolate(history, TARGET_M)
 
         if next_cal is None:
-            # No bracket yet — use empirical Chimp factor to step toward target.
-            # Higher cal → lower reading (negative slope), so negative error → lower cal.
+            # Higher cal → lower reading. Step toward target.
+            # err > 0 (reading too high): delta > 0, cal increases → reading drops.
+            # err < 0 (reading too low):  delta < 0, cal decreases → reading rises.
             delta = round(err / METERS_PER_COUNT_CHIMP)
-            next_cal = cal - delta   # err negative → delta negative → cal decreases
+            next_cal = cal + delta
 
         # Guard: never suggest the same value we just measured
         if next_cal == cal:
