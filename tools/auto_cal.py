@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-auto_cal.py — Automated SX1280 ranging calibration (Chimp as master).
+auto_cal.py — Automated SX1280 ranging calibration (Alpha as master).
 
 Iterates CAL_TABLE[2][4] in firmware_calibration/src/main.cpp until
 mean ranging result ≈ 0.695 m (RG-316 1 m cable, VF 0.695).
 
+Firmware must be free-run master (no SPACE trigger). Waits for the
+first # [n=100] stats line after each flash (~70 s per iteration).
+
 Requires: pip install pyserial
 
 Usage (from giga_ranger root or tools/):
-    python3 tools/auto_cal.py --master-port /dev/ttyACM2 --pio ~/.local/bin/pio
+    python3 tools/auto_cal.py --master-port /dev/ttyACM1 --pio ~/.local/bin/pio
 """
 
 import re
@@ -81,18 +84,17 @@ def flash(port: str, pio: str) -> None:
 
 def run_sample(port: str) -> tuple[float, float]:
     """
-    Open serial port, send SPACE, collect 100-sample run, return (mean_m, sigma_m).
-    Port is opened once and kept open for the entire run to avoid ACM renumbering.
+    Open serial port, wait for first # [n=100] stats line, return (mean_m, sigma_m).
+    Free-run master firmware — no SPACE trigger needed.
+    100 samples × ~0.72 s each ≈ 72 s; deadline is 150 s.
     """
     print(f"[serial] Opening {port} at 115200")
     ser = serial.Serial(port, 115200, timeout=3.0)
     time.sleep(2.5)   # wait for board banner
     ser.reset_input_buffer()
 
-    print("[serial] Sending SPACE → starting 100-sample run")
-    ser.write(b" ")
-
-    deadline = time.time() + 200   # 100 × ~0.77 s per exchange + margin
+    print("[serial] Waiting for first 100-sample stats line (~70 s)...")
+    deadline = time.time() + 150
     result_line: str | None = None
 
     while time.time() < deadline:
@@ -102,19 +104,19 @@ def run_sample(port: str) -> tuple[float, float]:
         line = raw.decode("ascii", errors="replace").strip()
         if line:
             print(f"  {line}")
-        if line.startswith("# RESULT"):
+        if "# [n=" in line and "mean=" in line:
             result_line = line
             break
 
     ser.close()
 
     if result_line is None:
-        raise RuntimeError("Timed out waiting for RESULT line")
+        raise RuntimeError("Timed out waiting for # [n=] stats line")
 
     m = re.search(r"mean=([+-]?[\d.]+)", result_line)
     s = re.search(r"sigma=([\d.]+)", result_line)
     if not m or not s:
-        raise RuntimeError(f"Cannot parse RESULT: {result_line!r}")
+        raise RuntimeError(f"Cannot parse stats line: {result_line!r}")
     return float(m.group(1)), float(s.group(1))
 
 
@@ -147,16 +149,16 @@ def interpolate(data: list[tuple[int, float]], target: float) -> int | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--master-port", default="/dev/ttyACM2",
-                    help="Serial port for Chimp (master)")
+    ap.add_argument("--master-port", default="/dev/ttyACM1",
+                    help="Serial port for Alpha (master)")
     ap.add_argument("--pio", default="pio",
                     help="Path to pio executable, e.g. ~/.local/bin/pio")
-    ap.add_argument("--start-cal", type=int, default=13178,
+    ap.add_argument("--start-cal", type=int, default=13229,
                     help="Starting CAL_TABLE[2][4] value")
     args = ap.parse_args()
 
     print("=" * 62)
-    print("  SX1280 Auto-Calibration — Chimp master")
+    print("  SX1280 Auto-Calibration — Alpha master")
     print(f"  Target:  {TARGET_M} m  ±{TOLERANCE_M} m")
     print(f"  Port:    {args.master_port}")
     print(f"  PIO:     {args.pio}")
