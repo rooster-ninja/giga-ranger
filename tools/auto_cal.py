@@ -46,7 +46,13 @@ SEED_DATA: list[tuple[int, float]] = []  # populated per-board via --start-cal
 METERS_PER_COUNT_CHIMP = 0.02253
 
 
+CAL_MIN = 10000
+CAL_MAX = 16000
+
+
 def set_cal(val: int) -> None:
+    if not (CAL_MIN <= val <= CAL_MAX):
+        raise ValueError(f"cal {val} out of range [{CAL_MIN}, {CAL_MAX}] — bad measurement?")
     src = FW_SRC.read_text()
     # Match SF9 row by its trailing element 13376 — flexible about all other values/spacing
     new_src = re.sub(
