@@ -188,8 +188,8 @@ def main() -> None:
                     help="Serial port for Alpha (master)")
     ap.add_argument("--pio", default="pio",
                     help="Path to pio executable, e.g. ~/.local/bin/pio")
-    ap.add_argument("--start-cal", type=int, default=13343,
-                    help="Starting CAL_TABLE[2][4] value")
+    ap.add_argument("--start-cal", type=int, default=13316,
+                    help="Starting CAL_TABLE[2][4] value (13316 = Alpha convergence at die~36°C/amb~25.5°C, 2026-07-17)")
     args = ap.parse_args()
 
     print("=" * 62)
