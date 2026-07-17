@@ -49,7 +49,7 @@
 #define METERS_PER_COUNT  0.1803f  // SF9, BW=1625 kHz: c/(2×1625000×2^9)
 
 // ── Run parameters ────────────────────────────────────────────────────────────
-#define N_SAMPLES       100
+#define N_SAMPLES       500
 #define EXCHANGE_GAP_MS  20      // delay between exchanges (ms)
 #define CPU_BURN_MS     400      // busy-loop after each exchange to match production thermal load
 #define TIMEOUT_MS     2000      // per-exchange timeout
@@ -168,7 +168,7 @@ void setup() {
             err++;
         }
 
-        if (ok > 0 && ok % 100 == 0) {
+        if (ok > 0 && ok % 500 == 0) {
             double mean_m  = sum / ok;
             double var     = (sum_sq / ok) - (mean_m * mean_m);
             double sigma_m = sqrt(var < 0.0 ? 0.0 : var);

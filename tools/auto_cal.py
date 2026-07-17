@@ -86,15 +86,15 @@ def run_sample(port: str) -> tuple[float, float]:
     """
     Open serial port, wait for first # [n=100] stats line, return (mean_m, sigma_m).
     Free-run master firmware — no SPACE trigger needed.
-    100 samples × ~0.72 s each ≈ 72 s; deadline is 150 s.
+    500 samples × ~0.72 s each ≈ 360 s; deadline is 420 s.
     """
     print(f"[serial] Opening {port} at 115200")
     ser = serial.Serial(port, 115200, timeout=3.0)
     time.sleep(2.5)   # wait for board banner
     ser.reset_input_buffer()
 
-    print("[serial] Waiting for first 100-sample stats line (~70 s)...")
-    deadline = time.time() + 150
+    print("[serial] Waiting for first 500-sample stats line (~360 s)...")
+    deadline = time.time() + 420
     result_line: str | None = None
 
     while time.time() < deadline:
