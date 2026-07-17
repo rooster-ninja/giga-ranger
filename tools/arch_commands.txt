@@ -1,6 +1,6 @@
 ================================================================================
   GIGA RANGER — ARCH LAPTOP COMMANDS
-  ACM1 = Alpha (master)   ACM0 = Chimp (slave)
+  ACM1 = Alpha (master)   ACM3 = Chimp-001 (slave)  [ACM2 was Chimp, now ACM3]
 ================================================================================
 
 ── FIND USB PORTS ───────────────────────────────────────────────────────────────
@@ -13,7 +13,7 @@
   pio device monitor --port /dev/ttyACM1 --baud 115200
 
   # Chimp
-  pio device monitor --port /dev/ttyACM0 --baud 115200
+  pio device monitor --port /dev/ttyACM3 --baud 115200
 
 ── LOG TO CSV (calibration runs) ────────────────────────────────────────────────
 
@@ -23,7 +23,7 @@
 
   # Chimp — separate terminal
   cd ~/claude_projects/giga_ranger/firmware_calibration
-  pio device monitor --port /dev/ttyACM0 --baud 115200 | tee ~/Desktop/slave_$(date +%Y%m%d_%H%M%S).csv
+  pio device monitor --port /dev/ttyACM3 --baud 115200 | tee ~/Desktop/slave_$(date +%Y%m%d_%H%M%S).csv
 
 ── FLASH CALIBRATION FIRMWARE ───────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@
   pio run -e alpha -t upload --upload-port /dev/ttyACM1
 
   # Flash Chimp
-  pio run -e chimp -t upload --upload-port /dev/ttyACM0
+  pio run -e chimp-001 -t upload --upload-port /dev/ttyACM3
 
 ── MONITOR PRODUCTION FIRMWARE ──────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@
   pio device monitor --port /dev/ttyACM1 --baud 115200
 
   # Chimp serial (DBG + ranging data)
-  pio device monitor --port /dev/ttyACM0 --baud 115200
+  pio device monitor --port /dev/ttyACM3 --baud 115200
 
 ── LOG RANGING OUTPUT TO CSV ──────────────────────────────────────────────────────
 
@@ -60,8 +60,8 @@
   # Alpha — all output (ALPHA + DBG lines). Ctrl-C to stop.
   pio device monitor --port /dev/ttyACM1 --baud 115200 | tee ~/Desktop/ranging_alpha_$(date +%Y%m%d_%H%M%S).csv
 
-  # Chimp — DBG lines only (no ALPHA output on slave)
-  pio device monitor --port /dev/ttyACM0 --baud 115200 | tee ~/Desktop/ranging_chimp_$(date +%Y%m%d_%H%M%S).csv
+  # Chimp-001 — DBG lines only (no ALPHA output on slave)
+  pio device monitor --port /dev/ttyACM3 --baud 115200 | tee ~/Desktop/ranging_chimp_$(date +%Y%m%d_%H%M%S).csv
 
   # Alpha ALPHA-lines only — clean CSV with dist_m, raw_m, corr, rssi, temps:
   pio device monitor --port /dev/ttyACM1 --baud 115200 | grep "^ALPHA" | tee ~/Desktop/ranging_alpha_$(date +%Y%m%d_%H%M%S).csv
@@ -77,7 +77,7 @@
 
   Terminal 2 (Chimp / slave):
     cd ~/claude_projects/giga_ranger/firmware_calibration
-    pio device monitor --port /dev/ttyACM0 --baud 115200 | tee ~/Desktop/slave_$(date +%Y%m%d_%H%M%S).csv
+    pio device monitor --port /dev/ttyACM3 --baud 115200 | tee ~/Desktop/slave_$(date +%Y%m%d_%H%M%S).csv
 
   Run sequence:
     Step 1 — COLD:  place units in chilled environment (~3-4°C). Wait for BME amb_c to

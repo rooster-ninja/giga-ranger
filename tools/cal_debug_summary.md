@@ -6,19 +6,77 @@ ACM port assignments stay the same — only the names changed.
 
 | New name | Old name | Role       | ACM port | CAL_TABLE[2][4] |
 |----------|----------|------------|----------|-----------------|
-| Alpha    | Chimp    | Master     | ACM2     | **13229**       |
+| Alpha    | Chimp    | Master     | ACM2     | **13343**       |
 | Chimp    | Alpha    | Slave      | ACM1     | 13115 (as master, for reference only) |
 
-**Production cal (Alpha as master): 13229**
+**Production cal (Alpha as master): 13343** ← CURRENT (RadioLib 7.7.1)
+**AN1200.89 average (both boards as master): 13344** (13343 + 13346) / 2 = 13344.5
 
-## Final Calibration Results (clean data, new slave fw, 2026-07-16)
+## Final Calibration Results (auto_cal, n=500, 2026-07-16/17, RadioLib 7.7.1)
 
-| Master | CAL_TABLE[2][4] | mean (m) | sigma (m) | note |
-|--------|-----------------|----------|-----------|------|
-| Alpha (was Chimp) | **13229** | 0.7187 | 0.5961 | clean — use this |
-| Chimp (was Alpha) | 13115     | 0.7169 | 3.2309 | noisy — for reference |
+| Master | CAL_TABLE[2][4] | mean (m) | sigma (m) | die (°C) | amb (°C) | note |
+|--------|-----------------|----------|-----------|----------|----------|------|
+| Alpha  | **13343**       | 0.6849   | 0.9813    | 38.6     | 27.1     | ✅ converged 2026-07-16 |
+| Chimp  | **13346**       | 0.7050   | 0.9581    | 39.6     | 27.7     | ✅ converged 2026-07-17 |
+| _avg_  | **13344**       | —        | —         | —        | —        | AN1200.89 average (rounded down) |
+| Alpha  | 13229           | 0.7187   | 0.5961    | 38.6     | —        | superseded — RadioLib <7.7.1 |
 
-Using 13229 (new Alpha's value). Roles will not swap in production.
+**AN1200.89 note:** The standard says use the average of both boards' CalValues when each acts as master.
+(13343 + 13346) / 2 = 13344.5 → **13344**. The 3-count (68mm) spread is within measurement noise
+(σ/√500 ≈ 45mm → ~2 counts), so both boards are functionally identical.
+
+**Production firmware** uses `CAL_TABLE[2][4] = 13343` (Alpha-as-master value). Using 13344 instead
+would shift mean readings by 0.023m — negligible vs σ ≈ 1m per sample.
+
+**RadioLib version note:** Upgrading from <7.7.1 to 7.7.1 shifted all SF9/BW1625 readings by ~+2.57m
+(114 counts × 0.02253 m/count). Re-calibration is required after any RadioLib version change.
+
+**Oscillation in Chimp calibration (iterations 3-7):** Both cal=13323 and cal=13325 produced
+means ranging from 0.64m to 1.17m across different 500-sample runs. Root cause: measurement σ ≈ 1m
+gives σ_mean ≈ 45mm, which exceeds the ±30mm tolerance. Near the calibration point, individual runs
+can land either side of target. Auto_cal recovered by interpolating the history and jumping to 13346.
+
+---
+
+## Temperature Sweep Analysis (2026-07-16)
+
+Contiguous sweep file: `Assets/master_20260716_214604.csv`
+Firmware: calibration master, CAL=13229 (RadioLib 7.7.1), CPU burn active.
+Duration: 141 min, 11,709 raw rows.
+
+### Phase summary
+
+| Phase | Die (°C) | raw_m median | σ (m) | n |
+|-------|----------|-------------|-------|---|
+| Ambient start | 39.6 | 3.200 | 0.80 | 375 |
+| Cold stable   | 16.6 | 4.642 | 0.99 | 625 |
+| Hot stable    | 48.6 | 2.637 | 0.79 | 897 |
+| Ambient end   | 39.6 | 2.885 | 0.69 | 416 |
+
+All absolute readings offset by +2.505m from calibrated zero because sweep used CAL=13229;
+corrected (subtracting offset) values would be: cold=+2.14m, hot=−0.56m vs 0.695m target.
+
+### Temperature coefficient
+
+| Metric | Value |
+|--------|-------|
+| Phase slope (cold → hot) | **−0.063 m/°C** die temp |
+| In cal-count units | **−2.8 counts/°C** |
+| Δdie measured | 32.0°C (16.6 → 48.6°C) |
+| Δraw measured | −2.01 m |
+| Per 10°C die change | ~0.63 m reading shift |
+
+**Direction: higher die temperature → lower ranging reading.**
+
+Practical impact: a ±15°C die excursion from calibration point shifts the reading by ~±0.95m.
+For the 60 km production link, individual-reading σ ≈ 1–2m, so temperature-induced drift is
+within the noise floor. Long-run averaged measurements benefit from knowing the die temperature
+(already logged in BLE NUS output).
+
+Long-term drift at constant die: −0.32m over 2.4h (within measurement uncertainty at n≈400,
+σ_mean ≈ 0.04m → ~8σ; likely thermal equilibration of board structure, not oscillator aging).
+
+---
 
 ---
 

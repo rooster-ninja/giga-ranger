@@ -13,6 +13,7 @@
 
 #include <Arduino.h>
 #include <SPI.h>
+#include <WiFi.h>
 #include <RadioLib.h>
 #include <Wire.h>
 #include <U8g2lib.h>
@@ -55,13 +56,14 @@
 #define RF_BW_KHZ     1625.0f
 #define RF_SF             9
 #define RF_TX_DBM        13    // OTA — PA FEM; never exceed +5 dBm conducted
+#define FW_REV           "CMP-001"  // comparison firmware — CAL vs PROD ranging
 
-// Calibration table: SF9/BW1625 corrected 2026-07-15 at +13 dBm TX. CAL_TABLE[2][4] = 12849.
-// 3-run average CalVal=0 (means 0.660 m vs target 0.695 m, 34 mm residual).
+// Calibration table: SF9/BW1625 auto_cal 2026-07-16, RadioLib 7.7.1. CAL_TABLE[2][4] = 13343.
+// Alpha as master, n=500, mean=0.6849m, sigma=0.9813m, die=38.6°C, amb=27.1°C.
 static const uint16_t CAL_TABLE[3][6] = {
     { 10299, 10271, 10244, 10242, 10230, 10246 },  // BW 406.25 kHz
     { 11486, 11474, 11453, 11426, 11417, 11401 },  // BW 812.50 kHz
-    { 13308, 13493, 13528, 13515, 12849, 13376 },  // BW 1625.00 kHz (SF9 [2][4] = 12849)
+    { 13308, 13493, 13528, 13515, 13343, 13376 },  // BW 1625.00 kHz (SF9 [2][4] = 13343)
 };
 #define RANGING_ADDR      0xDEADBEEF
 #define RANGING_INTERVAL_MS  5000   // ms between master-initiated exchanges
@@ -72,12 +74,17 @@ static const uint16_t CAL_TABLE[3][6] = {
 #define MEDIAN_N      5
 
 // ── Temperature correction ────────────────────────────────────────────────────
-// Derived from Operation Icebox 2026-07-15: continuous cold→hot→ambient run.
-// Variable: BME280 ambient (not die temp). Coefficient: +0.0665 m/°C.
+// Icebox sweep 2026-07-16 (Assets/master_20260716_214604.csv, 141 min, CAL=13229, RadioLib 7.7.1):
+//   Die temp coefficient: -0.063 m/°C (higher die → lower reading).
+//   Phase endpoints: cold die=16.6°C → raw=4.64m; hot die=48.6°C → raw=2.64m; Δdie=32°C, Δraw=-2.01m.
+// NOTE: TEMP_COEFF below was derived from BME ambient in Icebox 2026-07-15 (+0.0665 m/°C amb).
+//   The two coefficients have opposite signs because BME ambient reflects cable thermal effects
+//   (warmer cable → longer electrical path → higher reading) while die temp reflects chip clock drift
+//   (warmer die → shorter ToF result). Net ambient coefficient may still be positive — leave as-is
+//   until a dedicated ambient regression is done on the 2026-07-16 sweep.
 // corrected = median - TEMP_COEFF * (bme_amb - CAL_AMB_C)
-// Update CAL_AMB_C to the actual BME ambient reading at calibration time.
-#define TEMP_COEFF   0.0665f   // m/°C — Operation Icebox 2026-07-15
-#define CAL_AMB_C    26.2f     // °C   — BME ambient during +13 dBm calibration runs (2026-07-15)
+#define TEMP_COEFF   0.0665f   // m/°C — BME ambient, Operation Icebox 2026-07-15
+#define CAL_AMB_C    27.1f     // °C   — BME ambient at auto_cal convergence 2026-07-16
 
 // ── BLE NUS UUIDs (Nordic UART Service, standard) ────────────────────────────
 #define NUS_SERVICE_UUID  "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -192,12 +199,58 @@ static float get_ranging_rssi() {
     if (rssi_raw == 0) return 0.0f;
     return -(float)rssi_raw / 2.0f;
 }
+
+// CAL-style ranging: exact reproduction of calibration firmware's do_ranging(true).
+// Differences from prod: re-attaches setDio1Action before every exchange, no get_ranging_rssi,
+// runs EXCHANGE_GAP_MS(20ms) + CPU_BURN_MS(400ms) after the result read.
+static float do_ranging_cal() {
+    isr_fired = false;
+    radio.setDio1Action(on_dio1);  // calibration firmware re-attaches every call
+    int state = radio.startRanging(true, RANGING_ADDR, CAL_TABLE);
+    if (state != RADIOLIB_ERR_NONE) return NAN;
+    unsigned long t0 = millis();
+    while (!isr_fired && millis() - t0 < 300) yield();
+    float result = radio.getRangingResult();  // calibration firmware: only this call
+    delay(20);
+    { volatile uint32_t x = 0; uint32_t tb = millis(); while (millis() - tb < 400) x++; }
+    return result;
+}
+
+// PROD-style ranging: current production firmware's do_ranging(true) logic.
+// Differences from cal: no setDio1Action in loop, calls get_ranging_rssi after result.
+static float do_ranging_prod(float *rssi_out) {
+    isr_fired = false;
+    // setDio1Action NOT called here — production calls it only once in setup()
+    int state = radio.startRanging(true, RANGING_ADDR, CAL_TABLE);
+    if (state != RADIOLIB_ERR_NONE) { *rssi_out = 0.0f; return NAN; }
+    unsigned long t0 = millis();
+    while (!isr_fired && millis() - t0 < 300) yield();
+    float result = radio.getRangingResult();
+    *rssi_out = get_ranging_rssi();  // production: extra call with standby(XOSC) inside
+    return result;
+}
 #endif
+
+// SX1280 ClearIrqStatus (0x97) — clears all IRQ flags, bringing DIO1 LOW.
+// radio.getRangingResult() does NOT clear slave IRQs empirically; this does.
+// Must be called after every slave do_ranging() cycle so the next exchange
+// produces a fresh RISING edge on DIO1 for the ISR to detect.
+static void clear_sx1280_irq() {
+    uint32_t t = millis();
+    while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
+    SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(RADIO_NSS, LOW);
+    SPI.transfer(0x97);  // ClearIrqStatus
+    SPI.transfer(0xFF);  // clear all IRQ bits 15-8
+    SPI.transfer(0xFF);  // clear all IRQ bits 7-0
+    digitalWrite(RADIO_NSS, HIGH);
+    SPI.endTransaction();
+    t = millis();
+    while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
+}
 
 float do_ranging(bool master) {
     isr_fired = false;
-    radio.standby();
-    radio.setDio1Action(on_dio1);
     int state = radio.startRanging(master, RANGING_ADDR, CAL_TABLE);
     if (state != RADIOLIB_ERR_NONE) { g_exchange_ok = false; return NAN; }
     unsigned long t0 = millis();
@@ -209,17 +262,18 @@ float do_ranging(bool master) {
     dbg_range = radio.getRangingResult();
     dbg_rssi  = get_ranging_rssi();
 #else
+    radio.getRangingResult();
     dbg_range = NAN;
-    dbg_rssi  = radio.getRSSI();
-    dbg_snr   = radio.getSNR();
+    if (isr_fired) {
+        dbg_rssi = radio.getRSSI();
+        dbg_snr  = radio.getSNR();
+        clear_sx1280_irq();
+    }
 #endif
 
     g_rssi = dbg_rssi;
     g_snr  = dbg_snr;
     g_exchange_ok = (dbg_rssi < -5.0f && dbg_rssi > -115.0f);
-
-    // Always return the raw ranging result; the caller uses stale-detection to decide
-    // if an exchange actually happened this cycle. NAN only on radio init failure above.
     return dbg_range;
 }
 
@@ -372,35 +426,13 @@ void ble_init(const char *name) {
 
 void setup() {
     Serial.begin(115200);
+    WiFi.mode(WIFI_OFF);
     delay(2000);
 
-    Wire.begin(OLED_SDA, OLED_SCL);
     Wire1.begin(BME_SDA, BME_SCL);
-
-    // OLED
-    display.setI2CAddress(OLED_ADDR << 1);
-    display.begin();
-    display.clearBuffer();
-    display.setFont(u8g2_font_6x10_tr);
-#ifdef ROLE_ALPHA
-    display.drawStr(0, 10, "ALPHA");
-#else
-    display.drawStr(0, 10, "CHIMP-001");
-#endif
-    display.drawStr(0, 22, "Init...");
-    display.sendBuffer();
-
-    // SD card — CS not passed to sd_spi.begin(); SD.begin() manages CS itself
-    sd_spi.begin(SD_SCK, SD_MISO, SD_MOSI);
-    for (int i = 0; i < 3 && !sd_ok; i++) {
-        delay(200);
-        sd_ok = SD.begin(SD_CS, sd_spi, 4000000);
-    }
-    if (sd_ok) {
-        Serial.println("[OK] SD card mounted");
-    } else {
-        Serial.println("[WARN] SD not found — logging to serial only");
-    }
+    // OLED and SD disabled for CMP firmware — serial only
+    // Wire.begin(OLED_SDA, OLED_SCL);
+    // display.begin(); display.clearBuffer(); display.sendBuffer();
 
     // BME280 — Wire1, connector 1 (IO21=SDA, IO10=SCL)
     bme_ok = bme.begin(BME_ADDR, &Wire1);
@@ -415,12 +447,6 @@ void setup() {
     int state = radio.begin(RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, 5, 0x12, RF_TX_DBM);
     if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("[FATAL] radio.begin() failed: %d\n", state);
-        char errbuf[16];
-        snprintf(errbuf, sizeof(errbuf), "err %d", state);
-        display.clearBuffer();
-        display.drawStr(0, 10, "RADIO FAIL");
-        display.drawStr(0, 22, errbuf);
-        display.sendBuffer();
         while (true) delay(1000);
     }
     radio.setDio1Action(on_dio1);
@@ -429,168 +455,54 @@ void setup() {
         RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_TX_DBM);
 
     // BLE
-#ifdef ROLE_ALPHA
-    ble_init("GR-ALPHA");
-    Serial.println("[OK] BLE: GR-ALPHA advertising");
-#else
-    ble_init("GRCHIMP1");
-    Serial.println("[OK] BLE: GRCHIMP1 advertising");
-#endif
+// BLE disabled for ranging accuracy test — re-enable after bench validation
+// #ifdef ROLE_ALPHA
+//     ble_init("GR-ALPHA");
+//     Serial.println("[OK] BLE: GR-ALPHA advertising");
+// #else
+//     ble_init("GRCHIMP1");
+//     Serial.println("[OK] BLE: GRCHIMP1 advertising");
+// #endif
 
-    update_display();
-    Serial.println("[OK] Ready");
+    Serial.println("[OK] Ready — " FW_REV);
 }
 
 // ── loop ──────────────────────────────────────────────────────────────────────
 
 #ifdef ROLE_ALPHA
 
+// Alpha comparison loop: each iteration fires one CAL-style exchange then one PROD-style
+// exchange, printing results with FW_REV tag so version is unambiguous in the log.
 void loop() {
-    float raw = do_ranging(true);
-    char line[192];
+    static uint32_t n = 0;
+    n++;
 
-    // BME read once per cycle — reused in DBG and ALPHA lines
-    float bme_amb   = bme_ok ? bme.readTemperature() : CAL_AMB_C;
-    float bme_hum   = bme_ok ? bme.readHumidity()    : NAN;
-    float bme_pres  = bme_ok ? bme.readPressure() / 100.0f : NAN;
-    float temp_corr = -TEMP_COEFF * (bme_amb - CAL_AMB_C);
-    float die       = temperatureRead();
+    // --- CAL STYLE: exact calibration firmware master behaviour ---
+    float cal_result = do_ranging_cal();
+    bool  cal_isr    = isr_fired;
+    Serial.printf("CAL," FW_REV ",n=%lu,isr=%d,range=%.4f,t=%lu\n",
+        n, (int)cal_isr, cal_result, millis() / 1000);
 
-    char s_temp[8], s_hum[8], s_pres[10];
-    if (bme_ok) {
-        snprintf(s_temp, sizeof(s_temp), "%.1f", bme_amb);
-        snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme_hum);
-        snprintf(s_pres, sizeof(s_pres), "%.1f", bme_pres);
-    } else { strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); strcpy(s_pres, "NA"); }
+    delay(2000);  // gap — Chimp re-arms during this window before PROD exchange
 
-    // Stale detection: getRangingResult() registers are only updated by the SX1280 hardware
-    // on a completed exchange. Bit-identical consecutive values mean the register is stale
-    // (no exchange occurred). Any change in the float value → exchange happened this cycle.
-    static float    prev_raw     = NAN;
-    static uint32_t last_ok_ms   = 0;
-    static bool     had_exchange = false;
+    // --- PROD STYLE: current production firmware master behaviour ---
+    float prod_rssi;
+    float prod_result = do_ranging_prod(&prod_rssi);
+    bool  prod_isr    = isr_fired;
+    Serial.printf("PROD," FW_REV ",n=%lu,isr=%d,range=%.4f,rssi=%.1f,t=%lu\n",
+        n, (int)prod_isr, prod_result, prod_rssi, millis() / 1000);
 
-    bool exchange = false;
-    if (!isnan(raw)) {
-        if (isnan(prev_raw) || raw != prev_raw) {
-            prev_raw     = raw;
-            last_ok_ms   = millis();
-            had_exchange = true;
-            exchange     = true;
-        }
-    }
-    link_ok = had_exchange && (millis() - last_ok_ms < LINK_TIMEOUT_MS);
-
-    uint32_t age_s = had_exchange ? (millis() - last_ok_ms) / 1000 : 99;
-    {
-        char s_epoch[16];
-        epoch_field(s_epoch, sizeof(s_epoch));
-        snprintf(line, sizeof(line),
-            "DBG,t=%lu,epoch=%s,range=%.2f,rssi=%.0f,exch=%d,link=%s,age=%lu,ok=%lu"
-            ",die=%.1f,temp=%s,hum=%s,corr=%+.3f\n",
-            millis() / 1000, s_epoch, dbg_range, dbg_rssi, (int)exchange,
-            link_ok ? "OK" : "--", (unsigned long)age_s, (unsigned long)ok_count,
-            die, s_temp, s_hum, temp_corr);
-    }
-    Serial.print(line);
-    sd_log(line);
-
-    // Distance clears immediately when no exchange detected this cycle.
-    // RSSI waits for the full link_ok timeout before clearing.
-    if (!exchange) {
-        display_range = NAN;
-    }
-    if (!link_ok) {
-        display_rssi = 0;
-    } else if (exchange) {
-        display_rssi = g_rssi;
-
-        float median;
-        if (outlier_filter(raw, &median)) {
-            ok_count++;
-
-            float corrected = median + temp_corr;
-            display_range = corrected;
-
-            char s_epoch[16];
-            epoch_field(s_epoch, sizeof(s_epoch));
-
-            Serial.printf("range=%.3f m (raw=%.3f corr=%+.3f)  rssi=%.0f  ok=%lu\n",
-                corrected, median, temp_corr, display_rssi, (unsigned long)ok_count);
-
-            snprintf(line, sizeof(line),
-                "ALPHA,t=%lu,epoch=%s,dist_m=%.3f,raw_m=%.3f,corr=%+.3f,rssi=%.0f"
-                ",die=%.1f,temp=%s,hum=%s,pres=%s,ok=%lu,rej=%lu\n",
-                millis() / 1000, s_epoch, corrected, median, temp_corr, display_rssi,
-                die, s_temp, s_hum, s_pres,
-                (unsigned long)ok_count, (unsigned long)rej_count);
-            ble_send(line);
-            sd_log(line);
-        } else {
-            rej_count++;
-            Serial.printf("# outlier rejected: %.1f m  (last_valid=%.1f)\n", raw, last_valid);
-            snprintf(line, sizeof(line),
-                "ALPHA,t=%lu,outlier=%.1f,rej=%lu\n",
-                millis() / 1000, raw, (unsigned long)rej_count);
-            ble_send(line);
-        }
-    }
-
-    update_display();
-    delay(RANGING_INTERVAL_MS);
+    delay(5000);
 }
 
-#else  // Chimp-001
+#else  // Chimp-001 slave
 
 void loop() {
     do_ranging(false);
-
-    // BME read once per cycle
-    float bme_amb   = bme_ok ? bme.readTemperature() : CAL_AMB_C;
-    float bme_hum   = bme_ok ? bme.readHumidity()    : NAN;
-    float temp_corr = -TEMP_COEFF * (bme_amb - CAL_AMB_C);
-    float die       = temperatureRead();
-
-    char s_temp[8], s_hum[8];
-    if (bme_ok) {
-        snprintf(s_temp, sizeof(s_temp), "%.1f", bme_amb);
-        snprintf(s_hum,  sizeof(s_hum),  "%.1f", bme_hum);
-    } else { strcpy(s_temp, "NA"); strcpy(s_hum, "NA"); }
-
-    // DIO1-based exchange detection: dbg_isr is true when DIO1 fired (slave received +
-    // responded to a ranging request). More reliable than RSSI/SNR change detection,
-    // which fails when signal is constant (e.g. stable free-air path at bench).
-    static uint32_t last_ok_ms   = 0;
-    static bool     had_exchange = false;
-
     bool exchange = dbg_isr;
-    if (exchange) {
-        last_ok_ms   = millis();
-        had_exchange = true;
-        ok_count++;
-    }
-    link_ok = had_exchange && (millis() - last_ok_ms < LINK_TIMEOUT_MS);
-
-    display_rssi = g_rssi;
-    display_snr  = g_snr;
-    update_display();
-
-    // age = seconds since last detected exchange (watch this count toward 30 → link flips)
-    uint32_t age_s = had_exchange ? (millis() - last_ok_ms) / 1000 : 99;
-    char line[192];
-    {
-        char s_epoch[16];
-        epoch_field(s_epoch, sizeof(s_epoch));
-        snprintf(line, sizeof(line),
-            "DBG,t=%lu,epoch=%s,rssi=%.1f,snr=%.1f,exch=%d,link=%s,age=%lu,ok=%lu"
-            ",die=%.1f,temp=%s,hum=%s,corr=%+.3f\n",
-            millis() / 1000, s_epoch, dbg_rssi, dbg_snr, (int)exchange,
-            link_ok ? "OK" : "--", (unsigned long)age_s, (unsigned long)ok_count,
-            die, s_temp, s_hum, temp_corr);
-    }
-    Serial.print(line);
-    sd_log(line);
-    ble_send(line);
+    if (exchange) ok_count++;
+    Serial.printf("DBG," FW_REV ",t=%lu,exch=%d,ok=%lu,rssi=%.1f,snr=%.1f\n",
+        millis() / 1000, (int)exchange, (unsigned long)ok_count, dbg_rssi, dbg_snr);
 }
 
 #endif

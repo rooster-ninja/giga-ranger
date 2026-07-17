@@ -90,18 +90,30 @@ def flash(port: str, pio: str) -> None:
 
 def run_sample(port: str) -> tuple[float, float]:
     """
-    Open serial port, wait for first # [n=100] stats line, return (mean_m, sigma_m).
-    Free-run master firmware — no SPACE trigger needed.
+    Collect 500 individual CSV samples from master firmware, apply IQR×3 outlier
+    rejection, return (filtered_mean_m, filtered_sigma_m).
+
+    Firmware emits individual lines as CSV "t_ms,raw_m,die_c,amb_c" while ranging.
+    At n=500 it emits "# [n=500] mean=... sigma=..." as a "done" trigger.
+    Samples within ±100 m of zero pass the firmware gate but may still be large
+    negative outliers (-10 to -30 m) caused by stale-register reads after timeouts.
+    IQR×3 filtering removes them without touching firmware.
+
     500 samples × ~0.72 s each ≈ 360 s; deadline is 420 s.
     """
+    import statistics as _stats
+
+    _CSV_RE = re.compile(r'^\d+,([+-]?\d+\.\d+),')
+
     print(f"[serial] Opening {port} at 115200")
     ser = serial.Serial(port, 115200, timeout=3.0)
-    time.sleep(2.5)   # wait for board banner
+    time.sleep(2.5)
     ser.reset_input_buffer()
 
     print("[serial] Waiting for first 500-sample stats line (~360 s)...")
     deadline = time.time() + 420
-    result_line: str | None = None
+    done = False
+    raw_samples: list[float] = []
 
     while time.time() < deadline:
         raw = ser.readline()
@@ -110,20 +122,37 @@ def run_sample(port: str) -> tuple[float, float]:
         line = raw.decode("ascii", errors="replace").strip()
         if line:
             print(f"  {line}")
+        m = _CSV_RE.match(line)
+        if m:
+            raw_samples.append(float(m.group(1)))
         if "# [n=" in line and "mean=" in line:
-            result_line = line
+            done = True
             break
 
     ser.close()
 
-    if result_line is None:
+    if not done:
         raise RuntimeError("Timed out waiting for # [n=] stats line")
+    if len(raw_samples) < 10:
+        raise RuntimeError(f"Too few individual samples received: {len(raw_samples)}")
 
-    m = re.search(r"mean=([+-]?[\d.]+)", result_line)
-    s = re.search(r"sigma=([\d.]+)", result_line)
-    if not m or not s:
-        raise RuntimeError(f"Cannot parse stats line: {result_line!r}")
-    return float(m.group(1)), float(s.group(1))
+    # IQR×3 outlier rejection
+    n_raw = len(raw_samples)
+    q1, _, q3 = _stats.quantiles(raw_samples, n=4)
+    iqr = q3 - q1
+    lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
+    clean = [x for x in raw_samples if lo <= x <= hi]
+    n_rejected = n_raw - len(clean)
+
+    if len(clean) < 10:
+        raise RuntimeError(f"Too few clean samples after IQR filter: {len(clean)}/{n_raw}")
+
+    mean_m  = _stats.mean(clean)
+    sigma_m = _stats.stdev(clean)
+    print(f"  [filter] n_raw={n_raw}  rejected={n_rejected}  n_clean={len(clean)}")
+    print(f"  [filter] mean={mean_m:.4f} m   sigma={sigma_m:.4f} m")
+
+    return mean_m, sigma_m
 
 
 def interpolate(data: list[tuple[int, float]], target: float) -> int | None:
@@ -159,7 +188,7 @@ def main() -> None:
                     help="Serial port for Alpha (master)")
     ap.add_argument("--pio", default="pio",
                     help="Path to pio executable, e.g. ~/.local/bin/pio")
-    ap.add_argument("--start-cal", type=int, default=13229,
+    ap.add_argument("--start-cal", type=int, default=13343,
                     help="Starting CAL_TABLE[2][4] value")
     args = ap.parse_args()
 
