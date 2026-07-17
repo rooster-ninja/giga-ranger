@@ -190,6 +190,10 @@ def main() -> None:
 
         history.append((cal, mean_m))
 
+        if mean_m > 50.0:
+            print(f"\n[ABORT] mean={mean_m:.1f} m — cable not connected or boards too far apart.")
+            sys.exit(1)
+
         if abs(err) <= TOLERANCE_M:
             print(f"\n{'=' * 62}")
             print(f"  CONVERGED   CAL_TABLE[2][4] = {cal}")
