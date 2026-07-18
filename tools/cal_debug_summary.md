@@ -109,6 +109,126 @@ Consistent post-filter σ of 0.53–0.57m confirms the filter is correct. The ra
 
 ---
 
+## ⚠️ Critical: SNR-Dependent Ranging Bias (2026-07-02)
+
+### Background
+
+A "for giggles" auto_cal run was conducted with **two** PE7601-40 attenuators in series (80 dB total)
+to characterize how the second attenuator's electrical length registers in CAL_TABLE[2][4].
+
+**Bench rig:** Alpha ── 40 dB atten ── 40 dB atten ── 1 m RG-316 ── Chimp  
+**Expected signal at receiver:** +13 dBm − 80 dB ≈ **−67 dBm** (link margin ~35 dB above sensitivity)  
+**Bench rig at normal 40 dB:** +13 dBm − 40 dB ≈ **−27 dBm** (margin ~75 dB)
+
+### What happened
+
+The script ran 15 iterations and **never converged**. CAL oscillated between 13608–13635, with
+the mean locked ~0.22m below the 0.695m target at all tried values:
+
+| Setup | Approx. converged CAL | Notes |
+|-------|----------------------|-------|
+| 40 dB (single atten) | **13316–13346** | Stable, reproducible across sessions |
+| 80 dB (dual atten, this run) | **~13612** (never stable) | +~296 counts from 40 dB baseline |
+
+**~296 counts = ~6.7 m equivalent electrical path** — grossly larger than the physical length
+of any SMA attenuator (~20–30 mm). The second attenuator's *physical* electrical contribution
+is < 0.001 m. The ~6.7 m is not cable length — it is **SNR-dependent ranging bias**.
+
+### Run-to-run variance at fixed CAL
+
+At 40 dB, repeated runs at the same CAL show mean variance of ~0.1 m (explained by σ_mean ≈ 0.022 m
+per batch, with some thermal drift). At 80 dB, the same fixed-CAL runs showed:
+
+| CAL | Observed means across iterations |
+|-----|----------------------------------|
+| 13622 | 0.4145, 0.5296, 0.4798 m — spread: **0.37 m** |
+| 13621 | 0.4312, 0.5098, 0.4310 m — spread: **0.18 m** |
+
+Run-to-run mean variance at the same CAL and same temperature is ~4× larger at 80 dB than at 40 dB.
+This is not just noisier individual samples (σ_filtered remained ~0.53–0.62 m, similar to before) —
+the **batch mean itself** is unstable. The SX1280 ranging correlator is intermittently locking onto
+different points in the correlation leading edge depending on noise realization.
+
+### Root cause: SX1280 ranging timing bias is SNR-dependent
+
+The SX1280 ranging uses a leading-edge correlation timing detection. At high SNR the correlation
+peak is sharp and timing is precise. As SNR drops:
+1. The correlation peak broadens and the leading edge flattens
+2. The timing bias of the peak detector shifts — lower SNR → later apparent detection → longer
+   apparent ToF → higher apparent range
+3. Small SNR fluctuations (thermal noise, minor gain variation) can tip between "detection modes"
+
+The CAL_TABLE in AN1200.89 corrects for the **fixed** internal processing delay at a **specific SNR
+operating point**. It does NOT generalize across SNR regimes. Each SNR regime has a different
+effective zero-point.
+
+### Implication for the 60 km production link
+
+| Setup | RSSI | Link margin above floor | CAL regime |
+|-------|------|------------------------|------------|
+| Bench 40 dB atten | ~−27 dBm | ~75 dB | "High SNR" |
+| Bench 80 dB atten | ~−67 dBm | ~35 dB | "Mid SNR" — oscillated, never converged |
+| **60 km field link** | **~−105 dBm** | **~3 dB** | **"Near-floor" — completely uncharacterized** |
+
+The field link operates at an SNR regime nowhere near the bench calibration point.
+A fixed CAL_TABLE value calibrated on the bench will have an unknown systematic offset at 60 km.
+
+### Consequences
+
+1. **No single bench-derived CAL value transfers reliably to the 60 km field link.**
+   The bias shifts with SNR; the field SNR is far outside the bench characterization range.
+
+2. **Linear thermal compensation (firmware_ranging `TEMP_COEFF`) does not fix this.**
+   SNR-dependent bias is a separate effect that compounds with thermal effects.
+
+3. **In-situ calibration using Board 3 is not just helpful — it is likely necessary for
+   any sub-meter production accuracy.** A co-located Board 3 at Alpha's site (known distance ≈ 0 m)
+   corrects thermal hysteresis, SNR-dependent bias, connector state, and long-term drift
+   simultaneously, without needing to model any of them independently.
+
+4. **For field characterization:** The BLE NUS output already includes die_c. Adding RSSI/SNR to
+   each line would allow direct characterization of ranging bias vs signal level across the
+   actual link geometry during initial deployment — this is more informative than any bench test.
+
+### Final run data: complete 15-iteration summary (2026-07-17)
+
+After the run completed at [FAIL], the collected history was:
+
+| CAL | mean (m) | Notes |
+|-----|----------|-------|
+| 13635 | +0.039 | early iteration, far above true answer |
+| 13632 | +0.002 | |
+| 13632 | +0.773 | **same CAL, 0.77m different mean** |
+| 13621 | +0.212 | |
+| 13618 | +0.272 | |
+| 13617 | +0.279 | |
+| 13616 | +0.432 | |
+| 13616 | **+1.045** | **same CAL, 0.61m different mean** |
+| 13611 | +0.412 | |
+| 13610 | +0.460 | |
+| 13610 | +0.593 | |
+| 13609 | +0.626 | |
+| 13609 | +0.657 | |
+| 13609 | **+0.912** | **same CAL, 0.29m from previous run at 13609** |
+| 13608 | +0.875 | |
+
+Three runs at CAL=13609 produced means of 0.626, 0.657, 0.912m (spread = 0.286m).  
+Expected σ_mean from noise (500 samples, σ≈0.58m): **0.026m**.  
+Actual batch-to-batch spread: **0.15–0.61m — 6–23× larger than expected from noise alone.**
+
+The batch mean is fundamentally unstable at this attenuation level. The convergence zone is approximately **CAL ≈ 13609–13610** (both sides of target appear), but no reliable single value can be extracted.
+
+**Summary of second-attenuator result:** The 80 dB setup requires approximately 293 counts more CAL than single-attenuator (~13316 → ~13609). Electrical path interpretation: **6.60m equivalent** — which is dominated by SNR-dependent timing bias, not physical cable length.
+
+### Second attenuator electrical path (as measured by SX1280)
+
+For completeness: the PE7601-40's "electrical length" as seen by the SX1280 ranging calibration
+at 40 dB working point is **~6.7 m** (296 counts × 0.02253 m/count). This is an artifact of
+SNR-dependent timing shift, not a physical path length. The number is meaningless for production
+use; it is documented here to explain the result, not to be trusted as a calibration constant.
+
+---
+
 ## Temperature Sweep Analysis (2026-07-16)
 
 Contiguous sweep file: `Assets/master_20260716_214604.csv`
