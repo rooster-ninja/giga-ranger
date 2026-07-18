@@ -88,22 +88,21 @@ def flash(port: str, pio: str) -> None:
         raise RuntimeError(f"pio flash failed (rc={r.returncode})")
 
 
-def run_sample(port: str) -> tuple[float, float]:
+def run_sample(port: str) -> tuple[float, float, float]:
     """
     Collect 500 individual CSV samples from master firmware, apply IQR×3 outlier
-    rejection, return (filtered_mean_m, filtered_sigma_m).
+    rejection, return (filtered_mean_m, filtered_sigma_m, mean_rssi_dbm).
 
-    Firmware emits individual lines as CSV "t_ms,raw_m,die_c,amb_c" while ranging.
-    At n=500 it emits "# [n=500] mean=... sigma=..." as a "done" trigger.
-    Samples within ±100 m of zero pass the firmware gate but may still be large
-    negative outliers (-10 to -30 m) caused by stale-register reads after timeouts.
-    IQR×3 filtering removes them without touching firmware.
+    Firmware emits "t_ms,raw_m,die_c,amb_c,rssi_dbm" per sample.
+    At n=500 it emits "# [n=500] mean=... sigma=... rssi=..." as a "done" trigger.
+    IQR×3 filtering on raw_m removes stale-register outliers without touching firmware.
 
     500 samples × ~0.72 s each ≈ 360 s; deadline is 420 s.
     """
     import statistics as _stats
 
-    _CSV_RE = re.compile(r'^\d+,([+-]?\d+\.\d+),')
+    # Groups: 1=raw_m, 2=die_c, 3=amb_c (or NA), 4=rssi_dbm
+    _CSV_RE = re.compile(r'^\d+,([+-]?\d+\.\d+),([+-]?\d+\.\d+),(?:[+-]?\d+\.\d+|NA),([+-]?\d+\.\d+)')
 
     print(f"[serial] Opening {port} at 115200")
     ser = serial.Serial(port, 115200, timeout=3.0)
@@ -113,7 +112,8 @@ def run_sample(port: str) -> tuple[float, float]:
     print("[serial] Waiting for first 500-sample stats line (~360 s)...")
     deadline = time.time() + 420
     done = False
-    raw_samples: list[float] = []
+    raw_samples:  list[float] = []
+    rssi_samples: list[float] = []
 
     while time.time() < deadline:
         raw = ser.readline()
@@ -125,6 +125,7 @@ def run_sample(port: str) -> tuple[float, float]:
         m = _CSV_RE.match(line)
         if m:
             raw_samples.append(float(m.group(1)))
+            rssi_samples.append(float(m.group(3)))
         if "# [n=" in line and "mean=" in line:
             done = True
             break
@@ -136,23 +137,27 @@ def run_sample(port: str) -> tuple[float, float]:
     if len(raw_samples) < 10:
         raise RuntimeError(f"Too few individual samples received: {len(raw_samples)}")
 
-    # IQR×3 outlier rejection
+    # IQR×3 outlier rejection on raw_m
     n_raw = len(raw_samples)
     q1, _, q3 = _stats.quantiles(raw_samples, n=4)
     iqr = q3 - q1
     lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
-    clean = [x for x in raw_samples if lo <= x <= hi]
-    n_rejected = n_raw - len(clean)
+    clean_pairs = [(r, s) for r, s in zip(raw_samples, rssi_samples) if lo <= r <= hi]
+    n_rejected  = n_raw - len(clean_pairs)
 
-    if len(clean) < 10:
-        raise RuntimeError(f"Too few clean samples after IQR filter: {len(clean)}/{n_raw}")
+    if len(clean_pairs) < 10:
+        raise RuntimeError(f"Too few clean samples after IQR filter: {len(clean_pairs)}/{n_raw}")
 
-    mean_m  = _stats.mean(clean)
-    sigma_m = _stats.stdev(clean)
-    print(f"  [filter] n_raw={n_raw}  rejected={n_rejected}  n_clean={len(clean)}")
-    print(f"  [filter] mean={mean_m:.4f} m   sigma={sigma_m:.4f} m")
+    clean_m    = [p[0] for p in clean_pairs]
+    clean_rssi = [p[1] for p in clean_pairs]
 
-    return mean_m, sigma_m
+    mean_m    = _stats.mean(clean_m)
+    sigma_m   = _stats.stdev(clean_m)
+    mean_rssi = _stats.mean(clean_rssi)
+    print(f"  [filter] n_raw={n_raw}  rejected={n_rejected}  n_clean={len(clean_m)}")
+    print(f"  [filter] mean={mean_m:.4f} m   sigma={sigma_m:.4f} m   rssi={mean_rssi:.1f} dBm")
+
+    return mean_m, sigma_m, mean_rssi
 
 
 def interpolate(data: list[tuple[int, float]], target: float) -> int | None:
@@ -211,11 +216,11 @@ def main() -> None:
         flash(args.master_port, args.pio)
         time.sleep(3.0)   # board reboot after flash
 
-        mean_m, sigma_m = run_sample(args.master_port)
+        mean_m, sigma_m, mean_rssi = run_sample(args.master_port)
         err = mean_m - TARGET_M
 
         print(f"\n>>> cal={cal}  mean={mean_m:.4f} m  sigma={sigma_m:.4f} m  "
-              f"error={err:+.4f} m")
+              f"rssi={mean_rssi:.1f} dBm  error={err:+.4f} m")
 
         history.append((cal, mean_m))
 

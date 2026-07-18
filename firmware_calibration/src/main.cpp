@@ -83,9 +83,37 @@ Adafruit_BME280 bme;
 static bool bme_ok = false;
 
 volatile bool isr_fired = false;
+static float g_rssi = 0.0f;
 
 IRAM_ATTR void onDio1() {
     isr_fired = true;
+}
+
+// Reads REG_RANGING_RSSI (0x0964) — the ranging engine's RSSI of the slave response.
+// GetPacketStatus is not populated for the ranging master; this register is the only
+// signal-strength measurement available on the master side.
+// Must be called immediately after getRangingResult(); getRangingResult() enables the
+// ranging clock (reg 0x097F bit 1) which gates the register read.
+// SX128x ReadRegister stream: [0x19][addrMSB][addrLSB][NOP][NOP] — data on 5th byte.
+static float get_ranging_rssi() {
+    radio.standby(RADIOLIB_SX128X_STANDBY_XOSC);
+    uint32_t t = millis();
+    while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
+    SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(RADIO_NSS, LOW);
+    SPI.transfer(0x19);
+    SPI.transfer(0x09);
+    SPI.transfer(0x64);
+    SPI.transfer(0x00);
+    uint8_t rssi_raw = SPI.transfer(0x00);
+    digitalWrite(RADIO_NSS, HIGH);
+    SPI.endTransaction();
+    delayMicroseconds(1);
+    t = millis();
+    while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
+    radio.standby();
+    if (rssi_raw == 0) return 0.0f;
+    return -(float)rssi_raw / 2.0f;
 }
 
 // Blocking ranging exchange with timeout. Returns measured distance (m) or NAN on failure.
@@ -103,6 +131,7 @@ float do_ranging(bool master) {
     while (!isr_fired && millis() - t0 < 300) yield();
 
     float result = radio.getRangingResult();
+    g_rssi = get_ranging_rssi();
     if (result == 0.0f) return NAN;  // discard uninitialized register (startup artifact)
     return result;
 }
@@ -139,9 +168,9 @@ void setup() {
     // ── MASTER — free-run, no sample limit (temperature calibration) ───────────
     Serial.println("Role: MASTER (Alpha)");
     Serial.printf("Cable: %.4f m electrical  CAL=%d\n", CABLE_ELEC_M, CAL_TABLE[2][4]);
-    Serial.println("t_ms,raw_m,die_c,amb_c");
+    Serial.println("t_ms,raw_m,die_c,amb_c,rssi_dbm");
 
-    double sum = 0.0, sum_sq = 0.0;
+    double sum = 0.0, sum_sq = 0.0, sum_rssi = 0.0;
     int ok = 0, err = 0, outlier = 0;
 
     while (true) {
@@ -152,15 +181,16 @@ void setup() {
 
         if (!isnan(m)) {
             if (m < -100.0f || m > 2000.0f) {
-                Serial.printf("# outlier %.4f die=%.1f\n", m, die);
+                Serial.printf("# outlier %.4f die=%.1f rssi=%.1f\n", m, die, g_rssi);
                 outlier++;
             } else {
                 if (isnan(amb))
-                    Serial.printf("%lu,%.4f,%.1f,NA\n", t, m, die);
+                    Serial.printf("%lu,%.4f,%.1f,NA,%.1f\n", t, m, die, g_rssi);
                 else
-                    Serial.printf("%lu,%.4f,%.1f,%.2f\n", t, m, die, amb);
-                sum    += m;
-                sum_sq += (double)m * m;
+                    Serial.printf("%lu,%.4f,%.1f,%.2f,%.1f\n", t, m, die, amb, g_rssi);
+                sum      += m;
+                sum_sq   += (double)m * m;
+                sum_rssi += g_rssi;
                 ok++;
             }
         } else {
@@ -173,8 +203,9 @@ void setup() {
             double var     = (sum_sq / ok) - (mean_m * mean_m);
             double sigma_m = sqrt(var < 0.0 ? 0.0 : var);
             float  cal_val = (float)((mean_m - CABLE_ELEC_M) / METERS_PER_COUNT);
-            Serial.printf("# [n=%d] mean=%.4f m  sigma=%.4f m  die=%.1f C  CalVal=%.0f\n",
-                ok, mean_m, sigma_m, die, cal_val);
+            float  mean_rssi = (float)(sum_rssi / ok);
+            Serial.printf("# [n=%d] mean=%.4f m  sigma=%.4f m  rssi=%.1f dBm  die=%.1f C  CalVal=%.0f\n",
+                ok, mean_m, sigma_m, mean_rssi, die, cal_val);
         }
 
         delay(EXCHANGE_GAP_MS);
