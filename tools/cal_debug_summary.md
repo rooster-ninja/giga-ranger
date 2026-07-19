@@ -229,6 +229,70 @@ use; it is documented here to explain the result, not to be trusted as a calibra
 
 ---
 
+## REG_RANGING_RSSI (0x0964) — Convention Note (2026-07-19)
+
+**For web publication:** The formula and convention for this register are non-obvious and worth documenting.
+
+### Register and formula
+
+The SX1280 ranging engine exposes the RSSI of the last ranging exchange (slave's response as received
+by the master) at register **0x0964 (REG_RANGING_RSSI)**. Formula from the SX1280 Programming Guide
+register map:
+
+```
+RSSI_dBm = -(float)rssi_raw / 2.0f
+```
+
+**Source:** SX1280/SX1281 Data Sheet / SX1280 Programming Guide, register 0x0964. AN1200.89
+(Theory and Principle of Advanced Ranging) is a theory/principles document and does not document
+individual registers. The formula is consistent with Semtech's reference implementation in the
+SX1280 SDK and in RadioLib's SX128x driver.
+
+### The inverted-convention trap
+
+In **standard dBm**, less negative = stronger signal (e.g., −27 dBm is stronger than −67 dBm).
+
+REG_RANGING_RSSI **reverses this**:
+
+| Bench attenuation | Expected received power | rssi_raw | Register output | Direction |
+|-------------------|------------------------|----------|-----------------|-----------|
+| 40 dB | ~−27 dBm (strong) | ~126 | **−63 dBm** | more negative = stronger |
+| 80 dB run 1 | ~−67 dBm (weak) | ~77 | **−38.5 dBm** | less negative = weaker |
+
+**More negative register output = stronger received signal.** This is the opposite of standard RSSI
+convention.
+
+### Why this happens
+
+The formula `-rssi_raw/2` follows Semtech's convention where rssi_raw encodes signal amplitude
+(larger raw = stronger signal → formula gives more negative dBm output). The ranging RSSI
+register appears to measure the correlation peak amplitude after despreading rather than raw
+RF input power — the processing gain of SF9 (~27 dB) is visible in the values
+(-67 dBm received → ~-38.5 dBm register output, Δ≈28.5 dBm ≈ SF9 gain). At 40 dB (strong
+signal), the AGC reduces gain to prevent saturation, which is why the register reads more
+negative than the raw Δ formula would predict.
+
+### Practical upshot
+
+The register value is **monotonically useful** as a relative signal-strength indicator for
+the SNR-dependent bias curve: more negative = higher SNR = lower expected ranging bias.
+It is NOT a calibrated absolute RSSI. Use it for:
+- Correlating ranging bias to received signal level
+- Detecting whether bench SNR conditions have changed between runs
+- Flagging low-SNR exchanges in production BLE NUS output
+
+**Do not interpret the absolute dBm value as true received power.**
+
+### Measured reference points (firmware_calibration, SF9/BW1625, Alpha as master)
+
+| Setup | CAL | rssi_raw (approx.) | Register output | Notes |
+|-------|-----|--------------------|-----------------|-------|
+| 40 dB bench | 13382 | ~126 | **−63 dBm** | Reference calibration point |
+| 80 dB bench, run 1 | 13316 | ~77 | **−38.5 dBm** | First dual-attenuator run |
+| 80 dB bench, run 2 | 13382 | ~62–64 | **−31 to −32 dBm** | Second run, conditions differ |
+
+---
+
 ## Temperature Sweep Analysis (2026-07-16)
 
 Contiguous sweep file: `Assets/master_20260716_214604.csv`
