@@ -52,10 +52,13 @@ _CSV_RE = re.compile(
 
 def set_fixed_gain(gain: int) -> None:
     src = FW_SRC.read_text()
+    if not re.search(r'#define\s+FIXED_GAIN\s+\d+', src):
+        raise RuntimeError(f"FIXED_GAIN define not found in {FW_SRC} — check firmware source")
     new_src = re.sub(r'(#define\s+FIXED_GAIN\s+)\d+', rf'\g<1>{gain}', src)
     if new_src == src:
-        raise RuntimeError(f"FIXED_GAIN pattern not found in {FW_SRC}")
-    FW_SRC.write_text(new_src)
+        print(f"[fw]  FIXED_GAIN already {gain} — skipping write")
+    else:
+        FW_SRC.write_text(new_src)
     print(f"[fw]  FIXED_GAIN = {gain}")
 
 

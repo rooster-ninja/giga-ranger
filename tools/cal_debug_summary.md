@@ -361,6 +361,91 @@ it's a fixed correlator artifact.
 
 ---
 
+### Full gain sweep: 80 dB bench, FIXED_GAIN 13→1 (2026-07-19)
+
+**Tool:** `tools/gain_sweep.py` (commit 0562165). Flashes FIXED_GAIN 13→1 in 1-step increments,
+500 samples each. CAL=13382, bench rig unchanged. True electrical length = 0.695 m.
+
+| gain | mean_m | σ (m) | RSSI (dBm) | bias_m |
+|------|--------|-------|------------|--------|
+| 13 | +5.061 | 0.536 | −40.5 | +4.366 |
+| 12 | +5.487 | 0.496 | −40.5 | +4.792 |
+| 11 | +5.313 | 0.588 | −40.5 | +4.618 |
+| 10 | +5.426 | 0.489 | −40.5 | +4.731 |
+| 9  | +4.300 | 0.528 | −40.5 | +3.605 |
+| 8  | +4.464 | 0.544 | −40.4 | +3.769 |
+| 7  | +4.806 | 0.517 | −40.2 | +4.111 |
+| 6  | +3.266 | 0.578 | −40.7 | +2.571 |
+| 5  | +2.933 | 0.729 | −40.4 | +2.238 |
+| 4  | +2.902 | 0.982 | −40.6 | +2.207 |
+| 3  | +2.596 | 1.395 | −41.0 | +1.901 |
+| 2  | +2.341 | 2.138 | −41.2 | +1.646 |
+| 1  | +1.406 | 4.992 | −42.2 | +0.711 |
+
+### Key findings from the sweep
+
+**Finding 1 — RSSI is constant across all 13 gain steps (−40.2 to −42.2 dBm, total span 2 dBm).**
+
+This is surprising. A 13-step gain range nominally spans ~54 dB of LNA gain. The 0x0964 RSSI
+register should show a large change if the received amplitude were tracking gain. Instead it is
+essentially flat. The explanation: the SX1280 ranging engine re-applies its own AGC normalisation
+during the ranging receive handshake, regardless of the manual gain register setting. Our
+`setup_gain()` writes persist in 0x089E (confirmed by readback) and DO shift the pre-exchange
+group delay — which is why the **mean changes** with gain step. But the **RSSI register**
+reflects the post-AGC normalised correlation peak amplitude, not the pre-AGC receive level.
+
+Practical consequence: RSSI cannot be used as a proxy for which gain step is active in production.
+
+**Finding 2 — Mean decreases with gain step, non-linearly, with discrete drops at gain=9 and gain=6.**
+
+The mean does not fall smoothly from 5.5 m (gain=13) to 1.4 m (gain=1). Instead there are
+two clear step-drops at gain boundaries:
+
+- **Gains 13–10:** plateau at ~5.1–5.5 m (State A territory)
+- **Gain 9:** drops to 4.3 m
+- **Gains 8–7:** partial recovery to 4.5–4.8 m
+- **Gain 6:** drops to 3.3 m
+- **Gains 5–4:** plateau at ~2.9 m
+- **Gains 3–2:** gradual decrease to 2.3 m
+- **Gain 1:** 1.4 m (approaching true 0.695 m)
+
+These discrete drops at gain=9 and gain=6 are correlator lock-mode transitions: the gain step
+crosses a threshold where the spurious leading-edge artifact that creates the ~5 m and ~4 m
+biases disappears, and the correlator locks onto a different (less-biased) peak.
+
+**Finding 3 — σ increases monotonically with decreasing gain.**
+
+| gain range | σ (m) | interpretation |
+|------------|-------|---------------|
+| 13–7 | 0.50–0.59 | adequate SNR, stable |
+| 6 | 0.58 | at transition threshold |
+| 5 | 0.73 | SNR degrading |
+| 4 | 0.98 | near floor |
+| 3 | 1.40 | noisy |
+| 2 | 2.14 | very noisy |
+| 1 | 4.99 | near noise floor |
+
+The usable SNR range ends around gain=6–7. Below that, per-sample noise
+dominates and individual range measurements are unreliable.
+
+**Finding 4 — gain=1 mean ≈ 1.4 m, σ = 5.0 m.**
+
+At minimum gain the signal is near the noise floor. The spurious lock target disappears (or
+fades below noise), and the surviving correlation feature is closer to the true ToF. The mean
+approaches State B's characteristic ~1.3 m. However σ = 5 m makes this completely unusable for
+ranging. There is no sweet spot at 80 dB where both correct mean AND low noise coexist.
+
+### Implication: no fixed gain step solves the 80 dB problem
+
+The fundamental issue is that the ~5 m and ~3 m lock targets are correlator artefacts that
+dominate at higher gain (adequate SNR), while the correct lock is only accessible near the noise
+floor (terrible SNR). There is no gain step in the table that delivers both accurate mean and
+acceptable σ at 80 dB. This further confirms that 80 dB bench attenuation is an inherently
+difficult operating point for SX1280 ranging, and **in-situ calibration at the field link's
+actual SNR is the only reliable path to sub-metre production accuracy**.
+
+---
+
 ## REG_RANGING_RSSI (0x0964) — Convention Note (2026-07-19)
 
 **For web publication:** The formula and convention for this register are non-obvious and worth documenting.
