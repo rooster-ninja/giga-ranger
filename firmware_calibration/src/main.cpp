@@ -59,7 +59,7 @@
 //             1-13 = lock to this gain step per SX1280 Table 4-2 (13=max sensitivity, 1=min).
 //             Use 0 for initial characterisation; set a fixed value once the correct step
 //             per-attenuation level is known to eliminate discrete gain-state transitions.
-#define FIXED_GAIN  0
+#define FIXED_GAIN  8
 
 // Calibration table: AN1200.89 factory baseline. SF9/BW1625 = [2][4] = 13430.
 // Compensates for SX1280 internal processing latency. Adjust [2][4] iteratively
