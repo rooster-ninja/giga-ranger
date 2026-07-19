@@ -47,19 +47,22 @@ DEFAULT_BATCH   = 500
 DEFAULT_PORT    = "/dev/ttyACM1"
 DEFAULT_CAL     = 13316
 
-# Matches individual master CSV rows: t_ms,raw_m,die_c,amb_c,rssi_dbm
-# amb_c may be "NA" when BME280 is absent.
-_ROW_RE = re.compile(r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+)')
+# Matches individual master CSV rows: t_ms,raw_m,die_c,amb_c,rssi_dbm[,gain_step]
+# amb_c may be "NA" when BME280 is absent. gain_step (1-13) is optional — absent in
+# firmware versions before gain readback was added; captured as group 6 (None if absent).
+_ROW_RE = re.compile(r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+)(?:,(\d+))?')
 
 
-def process_batch(rows: list[tuple[float, float, float, float]], cal: int, batch_n: int) -> tuple[dict, list[bool]]:
+def process_batch(rows: list[tuple[float, float, float, float, int]], cal: int, batch_n: int) -> tuple[dict, list[bool]]:
     """
     Returns (result_dict, kept_mask) where kept_mask[i] is True if rows[i] survived IQR filter.
+    rows: (raw_m, die_c, amb_c, rssi_dbm, gain_step)  gain_step=0 if not in firmware output.
     """
-    raw_m     = [r[0] for r in rows]
-    die_vals  = [r[1] for r in rows]
-    amb_vals  = [r[2] for r in rows if not math.isnan(r[2])]
-    rssi_vals = [r[3] for r in rows]
+    raw_m      = [r[0] for r in rows]
+    die_vals   = [r[1] for r in rows]
+    amb_vals   = [r[2] for r in rows if not math.isnan(r[2])]
+    rssi_vals  = [r[3] for r in rows]
+    gain_steps = [r[4] for r in rows]
 
     q1, _, q3 = st.quantiles(raw_m, n=4)
     iqr = q3 - q1
@@ -73,6 +76,12 @@ def process_batch(rows: list[tuple[float, float, float, float]], cal: int, batch
     if len(clean_m) < 10:
         raise RuntimeError(f"Too few clean samples: {len(clean_m)}/{len(raw_m)}")
 
+    # Gain step mode (most common value); 0 means firmware predates gain logging
+    gain_mode = 0
+    if any(g > 0 for g in gain_steps):
+        from collections import Counter
+        gain_mode = Counter(gain_steps).most_common(1)[0][0]
+
     return {
         "batch":      batch_n,
         "time_utc":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -80,6 +89,7 @@ def process_batch(rows: list[tuple[float, float, float, float]], cal: int, batch
         "die_c":      round(st.median(die_vals), 2),
         "amb_c":      round(st.median(amb_vals), 2) if amb_vals else "NA",
         "rssi_dbm":   round(st.mean(clean_r), 1),
+        "gain_step":  gain_mode,
         "mean_m":     round(st.mean(clean_m), 4),
         "sigma_m":    round(st.stdev(clean_m), 4),
         "n_raw":      len(raw_m),
@@ -105,9 +115,9 @@ def main() -> None:
     log_path = assets_dir / f"thermal_sweep_{ts}.csv"
     samples_path = assets_dir / f"thermal_sweep_{ts}_samples.csv"
 
-    fieldnames = ["batch", "time_utc", "cal", "die_c", "amb_c", "rssi_dbm",
+    fieldnames = ["batch", "time_utc", "cal", "die_c", "amb_c", "rssi_dbm", "gain_step",
                   "mean_m", "sigma_m", "n_raw", "n_rejected"]
-    sample_fieldnames = ["batch", "t_ms", "raw_m", "die_c", "amb_c", "rssi_dbm", "kept"]
+    sample_fieldnames = ["batch", "t_ms", "raw_m", "die_c", "amb_c", "rssi_dbm", "gain_step", "kept"]
 
     print("=" * 60)
     print("  SX1280 Thermal Regression Sweep")
@@ -121,16 +131,16 @@ def main() -> None:
     print(f"\n  Step die temp through plateaus. Wait for die_c to stabilise")
     print(f"  (≤0.5°C variance across 2-3 consecutive batches) before moving on.")
     print(f"  Ctrl-C to stop.\n")
-    print(f"  {'batch':>5}  {'die_c':>6}  {'amb_c':>6}  {'rssi':>7}  {'mean_m':>8}  {'sigma_m':>7}  {'rej':>4}")
-    print("  " + "─" * 56)
+    print(f"  {'batch':>5}  {'die_c':>6}  {'amb_c':>6}  {'rssi':>7}  {'gain':>4}  {'mean_m':>8}  {'sigma_m':>7}  {'rej':>4}")
+    print("  " + "─" * 62)
 
     ser = serial.Serial(args.port, 115200, timeout=3.0)
     time.sleep(2.5)
     ser.reset_input_buffer()
 
     batch_n = 0
-    # rows stores: (raw_m, die_c, amb_c, rssi_dbm, t_ms_str)
-    rows: list[tuple[float, float, float, float, str]] = []
+    # rows stores: (raw_m, die_c, amb_c, rssi_dbm, gain_step, t_ms_str)
+    rows: list[tuple[float, float, float, float, int, str]] = []
 
     with open(log_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -156,17 +166,19 @@ def main() -> None:
                     continue
                 t_ms_str = m.group(1)
                 amb_str  = m.group(4)
+                gain_str = m.group(6)
                 rows.append((
                     float(m.group(2)),
                     float(m.group(3)),
                     float(amb_str) if amb_str != 'NA' else float('nan'),
                     float(m.group(5)),
+                    int(gain_str) if gain_str is not None else 0,
                     t_ms_str,
                 ))
 
                 if len(rows) >= args.batch:
                     batch_n += 1
-                    data_rows = [(r[0], r[1], r[2], r[3]) for r in rows]
+                    data_rows = [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
                     try:
                         result, kept_mask = process_batch(data_rows, args.cal, batch_n)
                     except RuntimeError as e:
@@ -179,23 +191,26 @@ def main() -> None:
 
                     if sample_writer is not None:
                         for i, row in enumerate(rows):
-                            raw_m, die_c, amb_c, rssi_dbm, t_ms = row
+                            raw_m, die_c, amb_c, rssi_dbm, gain_step, t_ms = row
                             sample_writer.writerow({
-                                "batch":    batch_n,
-                                "t_ms":     t_ms,
-                                "raw_m":    f"{raw_m:.4f}",
-                                "die_c":    f"{die_c:.1f}",
-                                "amb_c":    f"{amb_c:.2f}" if not math.isnan(amb_c) else "NA",
-                                "rssi_dbm": f"{rssi_dbm:.1f}",
-                                "kept":     "1" if kept_mask[i] else "0",
+                                "batch":     batch_n,
+                                "t_ms":      t_ms,
+                                "raw_m":     f"{raw_m:.4f}",
+                                "die_c":     f"{die_c:.1f}",
+                                "amb_c":     f"{amb_c:.2f}" if not math.isnan(amb_c) else "NA",
+                                "rssi_dbm":  f"{rssi_dbm:.1f}",
+                                "gain_step": gain_step,
+                                "kept":      "1" if kept_mask[i] else "0",
                             })
                         sample_f.flush()
 
                     rows = []
-                    amb_disp = f"{result['amb_c']:>6.1f}" if result['amb_c'] != 'NA' else f"{'NA':>6}"
+                    amb_disp  = f"{result['amb_c']:>6.1f}" if result['amb_c'] != 'NA' else f"{'NA':>6}"
+                    gain_disp = f"{result['gain_step']:>4}" if result['gain_step'] > 0 else f"{'--':>4}"
                     print(f"  {result['batch']:>5}  {result['die_c']:>6.1f}  "
-                          f"{amb_disp}  {result['rssi_dbm']:>7.1f}  {result['mean_m']:>+8.4f}  "
-                          f"{result['sigma_m']:>7.4f}  {result['n_rejected']:>4}")
+                          f"{amb_disp}  {result['rssi_dbm']:>7.1f}  {gain_disp}  "
+                          f"{result['mean_m']:>+8.4f}  {result['sigma_m']:>7.4f}  "
+                          f"{result['n_rejected']:>4}")
 
         except KeyboardInterrupt:
             pass

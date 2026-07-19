@@ -54,6 +54,13 @@
 #define CPU_BURN_MS     400      // busy-loop after each exchange to match production thermal load
 #define TIMEOUT_MS     2000      // per-exchange timeout
 
+// ── AGC / Gain control ────────────────────────────────────────────────────────
+// FIXED_GAIN: 0 = let AGC run freely (default for 40 dB bench calibration).
+//             1-13 = lock to this gain step per SX1280 Table 4-2 (13=max sensitivity, 1=min).
+//             Use 0 for initial characterisation; set a fixed value once the correct step
+//             per-attenuation level is known to eliminate discrete gain-state transitions.
+#define FIXED_GAIN  0
+
 // Calibration table: AN1200.89 factory baseline. SF9/BW1625 = [2][4] = 13430.
 // Compensates for SX1280 internal processing latency. Adjust [2][4] iteratively
 // until mean ≈ CABLE_ELEC_M (0.695 m). Formula: new_cal = old_cal + CalVal × 8.06
@@ -83,37 +90,79 @@ Adafruit_BME280 bme;
 static bool bme_ok = false;
 
 volatile bool isr_fired = false;
-static float g_rssi = 0.0f;
+static float   g_rssi      = 0.0f;
+static uint8_t g_gain_step = 0;    // AGC/manual gain step 1-13 from REG_GAIN_VALUE 0x089E
 
 IRAM_ATTR void onDio1() {
     isr_fired = true;
 }
 
-// Reads REG_RANGING_RSSI (0x0964) — the ranging engine's RSSI of the slave response.
-// GetPacketStatus is not populated for the ranging master; this register is the only
-// signal-strength measurement available on the master side.
-// Must be called immediately after getRangingResult(); getRangingResult() enables the
-// ranging clock (reg 0x097F bit 1) which gates the register read.
-// SX128x ReadRegister stream: [0x19][addrMSB][addrLSB][NOP][NOP] — data on 5th byte.
-static float get_ranging_rssi() {
-    radio.standby(RADIOLIB_SX128X_STANDBY_XOSC);
-    uint32_t t = millis();
-    while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
+// ── Low-level SPI helpers (chip must be in STANDBY_XOSC when called) ──────────
+
+static uint8_t spi_read_raw(uint16_t addr) {
     SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
     digitalWrite(RADIO_NSS, LOW);
     SPI.transfer(0x19);
-    SPI.transfer(0x09);
-    SPI.transfer(0x64);
+    SPI.transfer(addr >> 8);
+    SPI.transfer(addr & 0xFF);
     SPI.transfer(0x00);
-    uint8_t rssi_raw = SPI.transfer(0x00);
+    uint8_t v = SPI.transfer(0x00);
     digitalWrite(RADIO_NSS, HIGH);
     SPI.endTransaction();
-    delayMicroseconds(1);
+    delayMicroseconds(5);
+    return v;
+}
+
+static void spi_write_raw(uint16_t addr, uint8_t val) {
+    SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(RADIO_NSS, LOW);
+    SPI.transfer(0x18);
+    SPI.transfer(addr >> 8);
+    SPI.transfer(addr & 0xFF);
+    SPI.transfer(val);
+    digitalWrite(RADIO_NSS, HIGH);
+    SPI.endTransaction();
+    delayMicroseconds(5);
+}
+
+// Reads REG_RANGING_RSSI (0x0964) and REG_GAIN_VALUE (0x089E) in one STANDBY_XOSC window.
+// Must be called immediately after getRangingResult(); getRangingResult() enables the
+// ranging clock (reg 0x097F bit 1) which gates the RSSI register read.
+// Updates g_rssi (dBm, inverted convention: more negative = stronger) and g_gain_step (1-13).
+static void read_radio_state() {
+    radio.standby(RADIOLIB_SX128X_STANDBY_XOSC);
+    uint32_t t = millis();
+    while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
+
+    uint8_t rssi_raw = spi_read_raw(0x0964);  // REG_RANGING_RSSI
+    uint8_t gain_raw = spi_read_raw(0x089E);  // REG_GAIN_VALUE (bits 3:0 = step 1-13)
+
     t = millis();
     while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
     radio.standby();
-    if (rssi_raw == 0) return 0.0f;
-    return -(float)rssi_raw / 2.0f;
+
+    g_rssi      = (rssi_raw == 0) ? 0.0f : -(float)rssi_raw / 2.0f;
+    g_gain_step = gain_raw & 0x0F;
+}
+
+// If FIXED_GAIN > 0, locks the SX1280 to a specific gain step (SX1280 Table 4-1).
+// Must be called after radio.begin() and before first ranging exchange.
+static void setup_gain() {
+#if FIXED_GAIN > 0
+    radio.standby(RADIOLIB_SX128X_STANDBY_XOSC);
+    uint32_t t = millis();
+    while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
+    spi_write_raw(0x089F, spi_read_raw(0x089F) | 0x80);           // enable manual gain (bit 7)
+    spi_write_raw(0x0895, spi_read_raw(0x0895) | 0x01);           // enable manual gain (bit 0)
+    spi_write_raw(0x089E, (spi_read_raw(0x089E) & 0xF0) | (FIXED_GAIN & 0x0F));  // set step
+    uint8_t actual = spi_read_raw(0x089E) & 0x0F;
+    t = millis();
+    while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
+    radio.standby();
+    Serial.printf("# gain: MANUAL step=%d (verified 0x089E[3:0]=%d)\n", FIXED_GAIN, actual);
+#else
+    Serial.println("# gain: AGC auto");
+#endif
 }
 
 // Blocking ranging exchange with timeout. Returns measured distance (m) or NAN on failure.
@@ -131,7 +180,7 @@ float do_ranging(bool master) {
     while (!isr_fired && millis() - t0 < 300) yield();
 
     float result = radio.getRangingResult();
-    g_rssi = get_ranging_rssi();
+    read_radio_state();  // updates g_rssi and g_gain_step
     if (result == 0.0f) return NAN;  // discard uninitialized register (startup artifact)
     return result;
 }
@@ -164,13 +213,16 @@ void setup() {
     Serial.println("Radio OK");
     radio.setDio1Action(onDio1);
 
+    setup_gain();  // AGC or manual, per FIXED_GAIN
+
 #ifdef CAL_MASTER
     // ── MASTER — free-run, no sample limit (temperature calibration) ───────────
     Serial.println("Role: MASTER (Alpha)");
     Serial.printf("Cable: %.4f m electrical  CAL=%d\n", CABLE_ELEC_M, CAL_TABLE[2][4]);
-    Serial.println("t_ms,raw_m,die_c,amb_c,rssi_dbm");
+    Serial.println("t_ms,raw_m,die_c,amb_c,rssi_dbm,gain_step");
 
     double sum = 0.0, sum_sq = 0.0, sum_rssi = 0.0;
+    uint16_t gain_hist[16] = {};   // histogram for gain step mode
     int ok = 0, err = 0, outlier = 0;
 
     while (true) {
@@ -181,16 +233,20 @@ void setup() {
 
         if (!isnan(m)) {
             if (m < -100.0f || m > 2000.0f) {
-                Serial.printf("# outlier %.4f die=%.1f rssi=%.1f\n", m, die, g_rssi);
+                Serial.printf("# outlier %.4f die=%.1f rssi=%.1f gain=%d\n",
+                    m, die, g_rssi, g_gain_step);
                 outlier++;
             } else {
                 if (isnan(amb))
-                    Serial.printf("%lu,%.4f,%.1f,NA,%.1f\n", t, m, die, g_rssi);
+                    Serial.printf("%lu,%.4f,%.1f,NA,%.1f,%d\n",
+                        t, m, die, g_rssi, g_gain_step);
                 else
-                    Serial.printf("%lu,%.4f,%.1f,%.2f,%.1f\n", t, m, die, amb, g_rssi);
+                    Serial.printf("%lu,%.4f,%.1f,%.2f,%.1f,%d\n",
+                        t, m, die, amb, g_rssi, g_gain_step);
                 sum      += m;
                 sum_sq   += (double)m * m;
                 sum_rssi += g_rssi;
+                if (g_gain_step < 16) gain_hist[g_gain_step]++;
                 ok++;
             }
         } else {
@@ -204,8 +260,17 @@ void setup() {
             double sigma_m = sqrt(var < 0.0 ? 0.0 : var);
             float  cal_val = (float)((mean_m - CABLE_ELEC_M) / METERS_PER_COUNT);
             float  mean_rssi = (float)(sum_rssi / ok);
-            Serial.printf("# [n=%d] mean=%.4f m  sigma=%.4f m  rssi=%.1f dBm  die=%.1f C  CalVal=%.0f\n",
-                ok, mean_m, sigma_m, mean_rssi, die, cal_val);
+            // Mode gain step
+            uint8_t mode_gain = 0;
+            uint16_t mode_cnt = 0;
+            for (int i = 1; i < 16; i++) {
+                if (gain_hist[i] > mode_cnt) { mode_cnt = gain_hist[i]; mode_gain = i; }
+            }
+            Serial.printf("# [n=%d] mean=%.4f m  sigma=%.4f m  rssi=%.1f dBm  gain=%d  die=%.1f C  CalVal=%.0f\n",
+                ok, mean_m, sigma_m, mean_rssi, mode_gain, die, cal_val);
+            // Reset accumulators for next batch
+            sum = 0.0; sum_sq = 0.0; sum_rssi = 0.0;
+            memset(gain_hist, 0, sizeof(gain_hist));
         }
 
         delay(EXCHANGE_GAP_MS);
