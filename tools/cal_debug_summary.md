@@ -302,28 +302,59 @@ CSV gains a `gain_step` column. Stats line reports mode gain step per 500-sample
 Use 0 first to characterize which steps AGC selects at each attenuation level, then lock
 once the correct step per attenuation regime is identified.
 
-**Expected result if hypothesis is correct:**
-- `gain_step` column will show two distinct values correlating exactly with State A and State B
-- The RSSI jump will coincide with a `gain_step` integer change at the transition batch
-- Samples file (--save-samples) will show gain_step flipping within the transition batch
+### Test results (2026-07-19, commits 054c20e / 27c44c6)
 
-**Expected result if hypothesis is wrong:**
-- `gain_step` will be constant across the A/B transition
-- The RSSI/mean jump occurs with no corresponding gain step change
-- Root cause is elsewhere in the ranging state machine (correlator lock, crystal mode, etc.)
+**`FIXED_GAIN=10`** (4 batches, AGC State A conditions):
+- gain_step=10 confirmed on every sample
+- RSSI=−41.3 dBm, mean=5.40 m, batch-to-batch variance=**0.04 m** (≈1.5× noise floor)
+- Perfectly stable. Fixed gain eliminates the random A↔B transitions entirely.
 
-### Planned fix
+**`FIXED_GAIN=8`** (3 batches):
+- gain_step=8 confirmed on every sample
+- RSSI=−40.4 dBm, mean=4.36 m — State B did **not** appear.
 
-Once the gain step associated with each state is known:
+| Effect of 2 gain steps (10→8) | Value |
+|-------------------------------|-------|
+| RSSI shift | −0.9 dBm (0.45 dBm/step) |
+| Mean shift | −1.05 m (0.52 m/step) |
 
-1. Set `FIXED_GAIN` to the step used by the "correct lock" state (State B, ~1.3 m mean).
-2. Re-run thermal sweep at 80 dB to confirm mean stabilises at the correct lock value.
-3. Extend the same approach to all characterisation attenuation levels so each has a
-   known, stable gain setting for the bias curve measurement.
+### Hypothesis refuted — revised understanding
 
-**Note on gain choice for 40 dB bench:** At −27 dBm received, even the lowest gain step gives
-ample SNR. Locking to the same step used at 80 dB may cause overload at 40 dB; verify
-there is no saturation before locking gain across attenuation levels.
+**State B is not reachable by gain adjustment.** State B's RSSI signature (−31 dBm) is 9.4 dBm
+less negative than gain=8 (−40.4 dBm). At 0.45 dBm/step, reaching it would need ~21 more
+steps — exceeding the 13-step hardware range by 8. The AGC gain-step hypothesis is **wrong**
+for the A/B state distinction.
+
+**Revised: States A and B are different correlator lock decisions, not gain steps.**
+
+- **State A** (~5 m, RSSI ~−41 dBm): correlator locks on a spurious sidelobe with
+  *higher* correlation amplitude. Stable at gain=10 and gain=8.
+- **State B** (~1.3 m, RSSI ~−31 dBm): correlator locks on the *true* ToF peak, which has
+  *lower* correlation amplitude. Occurred stochastically in free-running AGC; not
+  reproducible by setting a lower fixed gain.
+
+The 10.6 dBm RSSI jump between states reflects the amplitude difference between correlation
+peaks (spurious sidelobe > true ToF peak at this SNR), not a gain-step change.
+
+### What manual gain control IS useful for
+
+1. **Stability:** Fixed gain eliminates random A↔B transitions. Gain=10 locked achieved
+   0.04 m batch-to-batch variance vs. multi-metre jumps in AGC mode.
+2. **Group delay characterisation:** The 0.52 m/step coefficient is a real secondary
+   systematic. If the 40 dB calibration (higher signal → AGC picks a lower gain step)
+   uses a different step than the 80 dB measurement, the group delay difference
+   compounds the SNR-dependent bias. **Open experiment:** run a few batches at 40 dB
+   with `FIXED_GAIN=0` and observe which gain step AGC naturally picks.
+
+### Open question: what is the spurious ~5 m lock target?
+
+At gain=10, mean ≈ 5.4 m with CAL=13382 → offset = 5.4 − 0.695 ≈ 4.7 m ≈ 208 ranging counts.
+This does not correspond to an obvious multiple of SF9 chip period or LoRa symbol length. Possible
+causes: multipath within the coaxial bench rig, a known SX1280 correlation function alias, or
+an undocumented leading-edge detection artifact at low SNR.
+**Proposed test:** change cable length (e.g., 0.5 m cable) and see if State A mean shifts by
+the same 0.15 m — if it tracks, the spurious lock is relative to the cable. If it doesn't move,
+it's a fixed correlator artifact.
 
 ---
 
