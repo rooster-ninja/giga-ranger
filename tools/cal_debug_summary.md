@@ -318,23 +318,26 @@ once the correct step per attenuation regime is identified.
 | RSSI shift | −0.9 dBm (0.45 dBm/step) |
 | Mean shift | −1.05 m (0.52 m/step) |
 
-### Hypothesis refuted — revised understanding
+### Partial test — AGC hypothesis still open (2026-07-19)
 
-**State B is not reachable by gain adjustment.** State B's RSSI signature (−31 dBm) is 9.4 dBm
-less negative than gain=8 (−40.4 dBm). At 0.45 dBm/step, reaching it would need ~21 more
-steps — exceeding the 13-step hardware range by 8. The AGC gain-step hypothesis is **wrong**
-for the A/B state distinction.
+**Important caveat:** During the original State A/B observations (batches 1–19 of the earlier
+run), gain logging firmware was not installed. The gain step the AGC selected during State B
+is **unknown**. It is entirely possible State B was the AGC naturally settling at a lower gain
+step (e.g., 4 or 5) under a specific thermal or signal-level condition. FIXED_GAIN=8 only
+ruled out gain=8 as the State B step; it did not rule out the gain-step hypothesis overall.
 
-**Revised: States A and B are different correlator lock decisions, not gain steps.**
+**What FIXED_GAIN=8 showed:**
 
-- **State A** (~5 m, RSSI ~−41 dBm): correlator locks on a spurious sidelobe with
-  *higher* correlation amplitude. Stable at gain=10 and gain=8.
-- **State B** (~1.3 m, RSSI ~−31 dBm): correlator locks on the *true* ToF peak, which has
-  *lower* correlation amplitude. Occurred stochastically in free-running AGC; not
-  reproducible by setting a lower fixed gain.
+- State A persists at gain=8 (mean ~4.36 m, RSSI −40.4 dBm). State B did not appear.
+- RSSI shifted only 0.9 dBm from gain=10 — RSSI is not a reliable proxy for gain step
+  at this SNR; the register likely reflects correlation peak amplitude, not raw RF level.
+- Group delay coefficient: **~0.52 m/step** — a real systematic between gain=10 and gain=8.
 
-The 10.6 dBm RSSI jump between states reflects the amplitude difference between correlation
-peaks (spurious sidelobe > true ToF peak at this SNR), not a gain-step change.
+**What remains unknown (pending gain_sweep.py results):**
+
+- Which gain step did the AGC use during State B? (no gain log for that run)
+- Does State B appear at a lower fixed gain step (< 8)?
+- Is the ~0.52 m/step trend linear to low gain steps, and does it reach 0.695 m?
 
 ### What manual gain control IS useful for
 
