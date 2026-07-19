@@ -46,8 +46,9 @@ N_SAMPLES  = 500
 TIMEOUT_S  = 450  # 500 samples × ~0.72 s + margin
 
 _CSV_RE = re.compile(
-    r'^\d+,([+-]?\d+\.\d+),([+-]?\d+\.\d+),(?:[+-]?\d+\.\d+|NA),([+-]?\d+\.\d+),(\d+)'
+    r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+),(\d+)'
 )
+# groups: 1=t_ms  2=raw_m  3=die_c  4=amb_c  5=rssi  6=gain_step
 
 
 def set_fixed_gain(gain: int) -> None:
@@ -71,57 +72,66 @@ def flash(port: str, pio: str) -> None:
         raise RuntimeError(f"pio flash failed (rc={r.returncode})")
 
 
-def collect_batch(port: str) -> dict | None:
+def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
     """
-    Collect N_SAMPLES CSV rows. Returns dict with mean_m, sigma_m, rssi_dbm, gain_step,
-    or None if insufficient samples received (signal lost).
+    Collect N_SAMPLES CSV rows.
+    Returns (summary_dict, raw_samples) or (None, None) if insufficient samples.
+    raw_samples: list of {t_ms, raw_m, die_c, amb_c, rssi_dbm, gain_step, kept}
     """
     print(f"[serial] Collecting {N_SAMPLES} samples (~{N_SAMPLES * 0.72 / 60:.0f} min)…")
     ser = serial.Serial(port, 115200, timeout=3.0)
     time.sleep(2.5)
     ser.reset_input_buffer()
 
-    raw_m:  list[float] = []
-    rssi:   list[float] = []
-    gains:  list[int]   = []
+    samples: list[tuple] = []  # (raw_m, rssi, gain, t_ms, die_c, amb_c)
     deadline = time.time() + TIMEOUT_S
 
-    while time.time() < deadline and len(raw_m) < N_SAMPLES:
+    while time.time() < deadline and len(samples) < N_SAMPLES:
         line = ser.readline().decode("ascii", errors="replace").strip()
         if line:
             print(f"  {line}")
         m = _CSV_RE.match(line)
         if m:
-            raw_m.append(float(m.group(1)))
-            rssi.append(float(m.group(3)))
-            gains.append(int(m.group(4)))
+            amb_str = m.group(4)
+            samples.append((
+                float(m.group(2)),   # raw_m
+                float(m.group(5)),   # rssi
+                int(m.group(6)),     # gain
+                m.group(1),          # t_ms (string)
+                float(m.group(3)),   # die_c
+                float(amb_str) if amb_str != "NA" else float("nan"),  # amb_c
+            ))
 
     ser.close()
 
-    if len(raw_m) < 50:
-        print(f"  [warn] Only {len(raw_m)} samples — signal likely lost at this gain step")
-        return None
+    if len(samples) < 50:
+        print(f"  [warn] Only {len(samples)} samples — signal likely lost at this gain step")
+        return None, None
+
+    raw_m = [s[0] for s in samples]
+    n_raw = len(raw_m)
 
     # IQR×3 filter
-    n_raw = len(raw_m)
     q1, _, q3 = st.quantiles(raw_m, n=4)
     iqr = q3 - q1
     lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
-    pairs = [(r, s, g) for r, s, g in zip(raw_m, rssi, gains) if lo <= r <= hi]
-    n_rej = n_raw - len(pairs)
+    kept_mask = [lo <= r <= hi for r in raw_m]
+    clean = [s for s, k in zip(samples, kept_mask) if k]
+    n_rej = n_raw - len(clean)
 
-    if len(pairs) < 10:
-        print(f"  [warn] Too few clean samples after filter: {len(pairs)}/{n_raw}")
-        return None
+    if len(clean) < 10:
+        print(f"  [warn] Too few clean samples after filter: {len(clean)}/{n_raw}")
+        return None, None
 
-    clean_m    = [p[0] for p in pairs]
-    clean_rssi = [p[1] for p in pairs]
-    clean_gain = [p[2] for p in pairs]
+    clean_m    = [s[0] for s in clean]
+    clean_rssi = [s[1] for s in clean]
+    clean_gain = [s[2] for s in clean]
 
+    import math
     from collections import Counter
     gain_mode = Counter(clean_gain).most_common(1)[0][0]
 
-    return {
+    summary = {
         "mean_m":    st.mean(clean_m),
         "sigma_m":   st.stdev(clean_m),
         "rssi_dbm":  st.mean(clean_rssi),
@@ -129,6 +139,21 @@ def collect_batch(port: str) -> dict | None:
         "n_raw":     n_raw,
         "n_rej":     n_rej,
     }
+
+    raw_rows = [
+        {
+            "t_ms":      s[3],
+            "raw_m":     f"{s[0]:.4f}",
+            "die_c":     f"{s[4]:.1f}",
+            "amb_c":     f"{s[5]:.2f}" if not math.isnan(s[5]) else "NA",
+            "rssi_dbm":  f"{s[1]:.1f}",
+            "gain_step": s[2],
+            "kept":      "1" if kept_mask[i] else "0",
+        }
+        for i, s in enumerate(samples)
+    ]
+
+    return summary, raw_rows
 
 
 def main() -> None:
@@ -142,26 +167,41 @@ def main() -> None:
                     help="End gain step inclusive (default 1 = min)")
     ap.add_argument("--cal",       type=int, default=13382,
                     help="CAL_TABLE[2][4] in firmware (for logging only)")
+    ap.add_argument("--save-samples", action="store_true",
+                    help="Write every raw sample to <log>_samples.csv for histogram analysis")
     args = ap.parse_args()
 
     step_dir = -1 if args.from_gain > args.to_gain else 1
     gain_steps = list(range(args.from_gain, args.to_gain + step_dir, step_dir))
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = ASSETS_DIR / f"gain_sweep_{ts}.csv"
+    log_path     = ASSETS_DIR / f"gain_sweep_{ts}.csv"
+    samples_path = ASSETS_DIR / f"gain_sweep_{ts}_samples.csv"
     fieldnames = ["gain_set", "gain_verified", "mean_m", "sigma_m", "rssi_dbm",
                   "n_raw", "n_rejected", "cal", "time_utc"]
+    sample_fieldnames = ["gain_set", "t_ms", "raw_m", "die_c", "amb_c",
+                         "rssi_dbm", "gain_step", "kept"]
 
     print("=" * 62)
     print("  SX1280 Gain Sweep")
     print(f"  Steps:  {args.from_gain} → {args.to_gain}  ({len(gain_steps)} steps)")
     print(f"  Port:   {args.port}   CAL={args.cal}")
     print(f"  Log:    {log_path.name}")
+    if args.save_samples:
+        print(f"  Samples:{samples_path.name}")
     print("=" * 62)
     print(f"\n  {'gain':>4}  {'mean_m':>8}  {'sigma_m':>7}  {'rssi':>7}  {'rej':>4}  note")
     print("  " + "─" * 52)
 
     results = []
+
+    sample_f = None
+    sample_writer = None
+    if args.save_samples:
+        sample_f = open(samples_path, "w", newline="")
+        sample_writer = csv.DictWriter(sample_f, fieldnames=sample_fieldnames)
+        sample_writer.writeheader()
+        sample_f.flush()
 
     with open(log_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -176,7 +216,7 @@ def main() -> None:
             flash(args.port, args.pio)
             time.sleep(3.0)
 
-            result = collect_batch(args.port)
+            result, raw_rows = collect_batch(args.port)
 
             if result is None:
                 note = "NO SIGNAL"
@@ -191,6 +231,11 @@ def main() -> None:
                 f.flush()
                 print(f"\n[gain_sweep] Signal lost at gain={gain}. Stopping.")
                 break
+
+            if sample_writer is not None and raw_rows:
+                for r in raw_rows:
+                    sample_writer.writerow({"gain_set": gain, **r})
+                sample_f.flush()
 
             row = {
                 "gain_set":      gain,
@@ -212,10 +257,13 @@ def main() -> None:
             print(f"  {gain:>4}  {result['mean_m']:>+8.4f}  {result['sigma_m']:>7.4f}  "
                   f"{result['rssi_dbm']:>7.1f}  {result['n_rej']:>4}  {note}")
 
+    if sample_f is not None:
+        sample_f.close()
+
     # Summary table
     if results:
         print(f"\n{'=' * 62}")
-        print(f"  Gain Sweep Summary (CAL={args.cal}, 80 dB bench)")
+        print(f"  Gain Sweep Summary  CAL={args.cal}  port={args.port}")
         print(f"  {'gain':>4}  {'mean_m':>8}  {'sigma_m':>7}  {'rssi':>7}  {'bias_m':>8}")
         print("  " + "─" * 46)
         for r in results:
@@ -224,6 +272,8 @@ def main() -> None:
                   f"{float(r['sigma_m']):>7.4f}  {float(r['rssi_dbm']):>7.1f}  {bias:>+8.4f}")
         print(f"{'=' * 62}")
         print(f"\n[gain_sweep] {len(results)} steps written → {log_path}")
+        if args.save_samples:
+            print(f"[gain_sweep] samples written → {samples_path}")
 
 
 if __name__ == "__main__":
