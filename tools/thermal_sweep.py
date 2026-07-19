@@ -34,6 +34,7 @@ import math
 import statistics as st
 import csv
 import argparse
+import threading
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -47,16 +48,27 @@ DEFAULT_BATCH   = 500
 DEFAULT_PORT    = "/dev/ttyACM1"
 DEFAULT_CAL     = 13316
 
-# Matches individual master CSV rows: t_ms,raw_m,die_c,amb_c,rssi_dbm[,gain_step]
-# amb_c may be "NA" when BME280 is absent. gain_step (1-13) is optional — absent in
-# firmware versions before gain readback was added; captured as group 6 (None if absent).
-_ROW_RE = re.compile(r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+)(?:,(\d+))?')
+# Matches individual master CSV rows: t_ms,raw_m,die_c,amb_c,rssi_dbm[,gain_step[,snr_db]]
+# amb_c may be "NA" when BME280 is absent.
+# gain_step and snr_db are optional — absent in older firmware versions.
+_ROW_RE = re.compile(
+    r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+)'
+    r'(?:,(\d+)(?:,([+-]?\d+\.\d+)(?:,([+-]?\d+\.\d+))?)?)?'
+)
+# groups: 1=t_ms  2=raw_m  3=die_c  4=amb_c  5=rssi  6=gain_step  7=snr_db  8=rssi_sync
+
+# Matches slave CSV rows: t_ms,die_c,amb_c,rssi_dbm,gain_step,snr_db,rssi_sync
+_SLAVE_RE = re.compile(
+    r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+),(\d+),([+-]?\d+\.\d+)'
+    r'(?:,([+-]?\d+\.\d+))?'
+)
+# groups: 1=t_ms  2=die_c  3=amb_c  4=rssi  5=gain_step  6=snr_db  7=rssi_sync
 
 
-def process_batch(rows: list[tuple[float, float, float, float, int]], cal: int, batch_n: int) -> tuple[dict, list[bool]]:
+def process_batch(rows: list[tuple], cal: int, batch_n: int) -> tuple[dict, list[bool]]:
     """
     Returns (result_dict, kept_mask) where kept_mask[i] is True if rows[i] survived IQR filter.
-    rows: (raw_m, die_c, amb_c, rssi_dbm, gain_step)  gain_step=0 if not in firmware output.
+    rows: (raw_m, die_c, amb_c, rssi_dbm, gain_step[, snr_db])  gain_step=0 if absent.
     """
     raw_m      = [r[0] for r in rows]
     die_vals   = [r[1] for r in rows]
@@ -97,6 +109,41 @@ def process_batch(rows: list[tuple[float, float, float, float, int]], cal: int, 
     }, kept_mask
 
 
+def _slave_logger(port: str, log_path: Path, stop_event: threading.Event) -> None:
+    """Background thread: read Chimp slave CSV rows and write to log_path."""
+    fieldnames = ["time_utc", "t_ms", "die_c", "amb_c", "rssi_dbm",
+                  "gain_step", "snr_db", "rssi_sync"]
+    try:
+        ser = serial.Serial(port, 115200, timeout=3.0)
+        time.sleep(2.5)
+        ser.reset_input_buffer()
+        with open(log_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            f.flush()
+            while not stop_event.is_set():
+                raw = ser.readline()
+                if not raw:
+                    continue
+                line = raw.decode("ascii", errors="replace").strip()
+                m = _SLAVE_RE.match(line)
+                if m:
+                    writer.writerow({
+                        "time_utc":  datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                        "t_ms":      m.group(1),
+                        "die_c":     m.group(2),
+                        "amb_c":     m.group(3),
+                        "rssi_dbm":  m.group(4),
+                        "gain_step": m.group(5),
+                        "snr_db":    m.group(6),
+                        "rssi_sync": m.group(7) if m.group(7) is not None else "",
+                    })
+                    f.flush()
+        ser.close()
+    except Exception as e:
+        print(f"\n[slave] logger error: {e}", file=sys.stderr)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -108,16 +155,20 @@ def main() -> None:
                     help="Samples per measurement batch (default 500, ~360 s)")
     ap.add_argument("--save-samples", action="store_true",
                     help="Write every raw sample to <log>_samples.csv for distribution analysis")
+    ap.add_argument("--slave-port", default=None,
+                    help="Also log Chimp (slave) serial output concurrently to <log>_slave.csv")
     args = ap.parse_args()
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     assets_dir = Path(__file__).resolve().parent.parent / "Assets"
-    log_path = assets_dir / f"thermal_sweep_{ts}.csv"
+    log_path     = assets_dir / f"thermal_sweep_{ts}.csv"
     samples_path = assets_dir / f"thermal_sweep_{ts}_samples.csv"
+    slave_path   = assets_dir / f"thermal_sweep_{ts}_slave.csv"
 
     fieldnames = ["batch", "time_utc", "cal", "die_c", "amb_c", "rssi_dbm", "gain_step",
                   "mean_m", "sigma_m", "n_raw", "n_rejected"]
-    sample_fieldnames = ["batch", "t_ms", "raw_m", "die_c", "amb_c", "rssi_dbm", "gain_step", "kept"]
+    sample_fieldnames = ["batch", "t_ms", "raw_m", "die_c", "amb_c", "rssi_dbm",
+                         "gain_step", "snr_db", "kept"]
 
     print("=" * 60)
     print("  SX1280 Thermal Regression Sweep")
@@ -127,6 +178,8 @@ def main() -> None:
     print(f"  Log file    : {log_path.name}")
     if args.save_samples:
         print(f"  Samples log : {samples_path.name}")
+    if args.slave_port:
+        print(f"  Slave port  : {args.slave_port}  → {slave_path.name}")
     print("=" * 60)
     print(f"\n  Step die temp through plateaus. Wait for die_c to stabilise")
     print(f"  (≤0.5°C variance across 2-3 consecutive batches) before moving on.")
@@ -134,13 +187,25 @@ def main() -> None:
     print(f"  {'batch':>5}  {'die_c':>6}  {'amb_c':>6}  {'rssi':>7}  {'gain':>4}  {'mean_m':>8}  {'sigma_m':>7}  {'rej':>4}")
     print("  " + "─" * 62)
 
+    # Start slave logger thread if requested
+    slave_stop = threading.Event()
+    slave_thread = None
+    if args.slave_port:
+        slave_thread = threading.Thread(
+            target=_slave_logger,
+            args=(args.slave_port, slave_path, slave_stop),
+            daemon=True,
+        )
+        slave_thread.start()
+        print(f"[slave] logging {args.slave_port} → {slave_path.name}")
+
     ser = serial.Serial(args.port, 115200, timeout=3.0)
     time.sleep(2.5)
     ser.reset_input_buffer()
 
     batch_n = 0
-    # rows stores: (raw_m, die_c, amb_c, rssi_dbm, gain_step, t_ms_str)
-    rows: list[tuple[float, float, float, float, int, str]] = []
+    # rows stores: (raw_m, die_c, amb_c, rssi_dbm, gain_step, t_ms_str, snr_db)
+    rows: list[tuple] = []
 
     with open(log_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -164,16 +229,20 @@ def main() -> None:
                 m = _ROW_RE.match(line)
                 if not m:
                     continue
-                t_ms_str = m.group(1)
-                amb_str  = m.group(4)
-                gain_str = m.group(6)
+                t_ms_str  = m.group(1)
+                amb_str   = m.group(4)
+                gain_str  = m.group(6)
+                snr_str   = m.group(7)
+                rsync_str = m.group(8)
                 rows.append((
-                    float(m.group(2)),
-                    float(m.group(3)),
-                    float(amb_str) if amb_str != 'NA' else float('nan'),
-                    float(m.group(5)),
-                    int(gain_str) if gain_str is not None else 0,
-                    t_ms_str,
+                    float(m.group(2)),                                        # raw_m
+                    float(m.group(3)),                                        # die_c
+                    float(amb_str) if amb_str != 'NA' else float('nan'),      # amb_c
+                    float(m.group(5)),                                        # rssi_dbm
+                    int(gain_str) if gain_str is not None else 0,             # gain_step
+                    t_ms_str,                                                 # t_ms
+                    float(snr_str) if snr_str is not None else float('nan'),  # snr_db
+                    float(rsync_str) if rsync_str is not None else float('nan'),  # rssi_sync
                 ))
 
                 if len(rows) >= args.batch:
@@ -191,16 +260,17 @@ def main() -> None:
 
                     if sample_writer is not None:
                         for i, row in enumerate(rows):
-                            raw_m, die_c, amb_c, rssi_dbm, gain_step, t_ms = row
+                            raw_m, die_c, amb_c, rssi_dbm, gain_step, t_ms, snr_db, rssi_sync = row
                             sample_writer.writerow({
-                                "batch":     batch_n,
-                                "t_ms":      t_ms,
-                                "raw_m":     f"{raw_m:.4f}",
-                                "die_c":     f"{die_c:.1f}",
-                                "amb_c":     f"{amb_c:.2f}" if not math.isnan(amb_c) else "NA",
-                                "rssi_dbm":  f"{rssi_dbm:.1f}",
-                                "gain_step": gain_step,
-                                "kept":      "1" if kept_mask[i] else "0",
+                                "batch":      batch_n,
+                                "t_ms":       t_ms,
+                                "raw_m":      f"{raw_m:.4f}",
+                                "die_c":      f"{die_c:.1f}",
+                                "amb_c":      f"{amb_c:.2f}" if not math.isnan(amb_c) else "NA",
+                                "rssi_dbm":   f"{rssi_dbm:.1f}",
+                                "gain_step":  gain_step,
+                                "snr_db":     f"{snr_db:.1f}" if not math.isnan(snr_db) else "",
+                                "kept":       "1" if kept_mask[i] else "0",
                             })
                         sample_f.flush()
 
@@ -217,6 +287,10 @@ def main() -> None:
 
         if sample_f is not None:
             sample_f.close()
+
+    slave_stop.set()
+    if slave_thread:
+        slave_thread.join(timeout=3.0)
 
     ser.close()
     print(f"\n[sweep] {batch_n} batches written → {log_path}")

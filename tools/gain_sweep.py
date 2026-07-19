@@ -47,8 +47,9 @@ TIMEOUT_S  = 450  # 500 samples × ~0.72 s + margin
 
 _CSV_RE = re.compile(
     r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+),(\d+)'
+    r'(?:,([+-]?\d+\.\d+)(?:,([+-]?\d+\.\d+))?)?'
 )
-# groups: 1=t_ms  2=raw_m  3=die_c  4=amb_c  5=rssi  6=gain_step
+# groups: 1=t_ms  2=raw_m  3=die_c  4=amb_c  5=rssi  6=gain_step  7=snr_db  8=rssi_sync
 
 
 def set_fixed_gain(gain: int) -> None:
@@ -92,14 +93,18 @@ def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
             print(f"  {line}")
         m = _CSV_RE.match(line)
         if m:
-            amb_str = m.group(4)
+            amb_str  = m.group(4)
+            snr_str  = m.group(7)
+            rsync_str = m.group(8)
             samples.append((
-                float(m.group(2)),   # raw_m
-                float(m.group(5)),   # rssi
-                int(m.group(6)),     # gain
-                m.group(1),          # t_ms (string)
-                float(m.group(3)),   # die_c
-                float(amb_str) if amb_str != "NA" else float("nan"),  # amb_c
+                float(m.group(2)),                                          # raw_m
+                float(m.group(5)),                                          # rssi
+                int(m.group(6)),                                            # gain
+                m.group(1),                                                 # t_ms (string)
+                float(m.group(3)),                                          # die_c
+                float(amb_str) if amb_str != "NA" else float("nan"),        # amb_c
+                float(snr_str) if snr_str is not None else float("nan"),    # snr_db
+                float(rsync_str) if rsync_str is not None else float("nan"),# rssi_sync
             ))
 
     ser.close()
@@ -142,13 +147,15 @@ def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
 
     raw_rows = [
         {
-            "t_ms":      s[3],
-            "raw_m":     f"{s[0]:.4f}",
-            "die_c":     f"{s[4]:.1f}",
-            "amb_c":     f"{s[5]:.2f}" if not math.isnan(s[5]) else "NA",
-            "rssi_dbm":  f"{s[1]:.1f}",
-            "gain_step": s[2],
-            "kept":      "1" if kept_mask[i] else "0",
+            "t_ms":       s[3],
+            "raw_m":      f"{s[0]:.4f}",
+            "die_c":      f"{s[4]:.1f}",
+            "amb_c":      f"{s[5]:.2f}" if not math.isnan(s[5]) else "NA",
+            "rssi_dbm":   f"{s[1]:.1f}",
+            "gain_step":  s[2],
+            "snr_db":     f"{s[6]:.1f}" if not math.isnan(s[6]) else "",
+            "rssi_sync":  f"{s[7]:.1f}" if not math.isnan(s[7]) else "",
+            "kept":       "1" if kept_mask[i] else "0",
         }
         for i, s in enumerate(samples)
     ]
@@ -180,7 +187,7 @@ def main() -> None:
     fieldnames = ["gain_set", "gain_verified", "mean_m", "sigma_m", "rssi_dbm",
                   "n_raw", "n_rejected", "cal", "time_utc"]
     sample_fieldnames = ["gain_set", "t_ms", "raw_m", "die_c", "amb_c",
-                         "rssi_dbm", "gain_step", "kept"]
+                         "rssi_dbm", "gain_step", "snr_db", "rssi_sync", "kept"]
 
     print("=" * 62)
     print("  SX1280 Gain Sweep")

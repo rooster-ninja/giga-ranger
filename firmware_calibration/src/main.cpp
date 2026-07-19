@@ -90,8 +90,10 @@ Adafruit_BME280 bme;
 static bool bme_ok = false;
 
 volatile bool isr_fired = false;
-static float   g_rssi      = 0.0f;
-static uint8_t g_gain_step = 0;    // AGC/manual gain step 1-13 from REG_GAIN_VALUE 0x089E
+static float   g_rssi      = 0.0f;   // REG_RANGING_RSSI 0x0964 — correlation peak amplitude (inverted: more negative = stronger)
+static float   g_rssi_sync = 0.0f;   // GetPacketStatus RssiSync — RSSI at sync-word detection
+static float   g_snr       = 0.0f;   // GetPacketStatus SnrPkt — per-exchange SNR in dB
+static uint8_t g_gain_step = 0;      // REG_GAIN_VALUE 0x089E bits 3:0 — AGC/manual gain step 1-13
 
 IRAM_ATTR void onDio1() {
     isr_fired = true;
@@ -123,6 +125,25 @@ static void spi_write_raw(uint16_t addr, uint8_t val) {
     digitalWrite(RADIO_NSS, HIGH);
     SPI.endTransaction();
     delayMicroseconds(5);
+}
+
+// GetPacketStatus (0x1D): reads RssiSync (byte 0) and SnrPkt (byte 1, signed) from the last
+// ranging exchange. Must be called immediately after getRangingResult(), before any state
+// transition, while the packet status registers are still valid.
+// Updates g_rssi_sync (dBm, standard convention: more negative = weaker) and g_snr (dB).
+static void read_pkt_status() {
+    SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(RADIO_NSS, LOW);
+    SPI.transfer(0x1D);                          // GetPacketStatus opcode
+    uint32_t t = millis();
+    while (digitalRead(RADIO_BUSY) && millis() - t < 5) {}
+    uint8_t rs = SPI.transfer(0x00);             // RssiSync (unsigned)
+    int8_t  sn = (int8_t)SPI.transfer(0x00);     // SnrPkt (signed, dB × 4)
+    digitalWrite(RADIO_NSS, HIGH);
+    SPI.endTransaction();
+    delayMicroseconds(5);
+    g_rssi_sync = (rs == 0) ? 0.0f : -(float)rs / 2.0f;
+    g_snr       = (float)sn / 4.0f;
 }
 
 // Reads REG_RANGING_RSSI (0x0964) and REG_GAIN_VALUE (0x089E) in one STANDBY_XOSC window.
@@ -180,7 +201,8 @@ float do_ranging(bool master) {
     while (!isr_fired && millis() - t0 < 300) yield();
 
     float result = radio.getRangingResult();
-    read_radio_state();  // updates g_rssi and g_gain_step
+    read_pkt_status();               // updates g_rssi_sync and g_snr (before state transition)
+    read_radio_state();              // updates g_rssi and g_gain_step
     if (result == 0.0f) return NAN;  // discard uninitialized register (startup artifact)
     return result;
 }
@@ -219,7 +241,7 @@ void setup() {
     // ── MASTER — free-run, no sample limit (temperature calibration) ───────────
     Serial.println("Role: MASTER (Alpha)");
     Serial.printf("Cable: %.4f m electrical  CAL=%d\n", CABLE_ELEC_M, CAL_TABLE[2][4]);
-    Serial.println("t_ms,raw_m,die_c,amb_c,rssi_dbm,gain_step");
+    Serial.println("t_ms,raw_m,die_c,amb_c,rssi_dbm,gain_step,snr_db,rssi_sync");
 
     double sum = 0.0, sum_sq = 0.0, sum_rssi = 0.0;
     uint16_t gain_hist[16] = {};   // histogram for gain step mode
@@ -238,11 +260,11 @@ void setup() {
                 outlier++;
             } else {
                 if (isnan(amb))
-                    Serial.printf("%lu,%.4f,%.1f,NA,%.1f,%d\n",
-                        t, m, die, g_rssi, g_gain_step);
+                    Serial.printf("%lu,%.4f,%.1f,NA,%.1f,%d,%.1f,%.1f\n",
+                        t, m, die, g_rssi, g_gain_step, g_snr, g_rssi_sync);
                 else
-                    Serial.printf("%lu,%.4f,%.1f,%.2f,%.1f,%d\n",
-                        t, m, die, amb, g_rssi, g_gain_step);
+                    Serial.printf("%lu,%.4f,%.1f,%.2f,%.1f,%d,%.1f,%.1f\n",
+                        t, m, die, amb, g_rssi, g_gain_step, g_snr, g_rssi_sync);
                 sum      += m;
                 sum_sq   += (double)m * m;
                 sum_rssi += g_rssi;
@@ -266,8 +288,8 @@ void setup() {
             for (int i = 1; i < 16; i++) {
                 if (gain_hist[i] > mode_cnt) { mode_cnt = gain_hist[i]; mode_gain = i; }
             }
-            Serial.printf("# [n=%d] mean=%.4f m  sigma=%.4f m  rssi=%.1f dBm  gain=%d  die=%.1f C  CalVal=%.0f\n",
-                ok, mean_m, sigma_m, mean_rssi, mode_gain, die, cal_val);
+            Serial.printf("# [n=%d] mean=%.4f m  sigma=%.4f m  rssi=%.1f dBm  snr=%.1f dB  rssi_sync=%.1f dBm  gain=%d  die=%.1f C  CalVal=%.0f\n",
+                ok, mean_m, sigma_m, mean_rssi, g_snr, g_rssi_sync, mode_gain, die, cal_val);
             // Reset accumulators for next batch
             sum = 0.0; sum_sq = 0.0; sum_rssi = 0.0;
             memset(gain_hist, 0, sizeof(gain_hist));
@@ -280,7 +302,7 @@ void setup() {
 #else
     // ── SLAVE ─────────────────────────────────────────────────────────────────
     Serial.println("Role: SLAVE (responder)");
-    Serial.println("t_ms,die_c,amb_c");
+    Serial.println("t_ms,die_c,amb_c,rssi_dbm,gain_step,snr_db,rssi_sync");
 #endif
 }
 
@@ -293,8 +315,10 @@ void loop() {
     float die = (float)temperatureRead();
     float amb = bme_ok ? bme.readTemperature() : NAN;
     if (isnan(amb))
-        Serial.printf("%lu,%.1f,NA\n", millis(), die);
+        Serial.printf("%lu,%.1f,NA,%.1f,%d,%.1f,%.1f\n",
+            millis(), die, g_rssi, g_gain_step, g_snr, g_rssi_sync);
     else
-        Serial.printf("%lu,%.1f,%.2f\n", millis(), die, amb);
+        Serial.printf("%lu,%.1f,%.2f,%.1f,%d,%.1f,%.1f\n",
+            millis(), die, amb, g_rssi, g_gain_step, g_snr, g_rssi_sync);
 #endif
 }
