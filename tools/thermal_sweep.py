@@ -153,8 +153,8 @@ def main() -> None:
                     help="CAL_TABLE[2][4] currently in firmware (for logging only — not modified)")
     ap.add_argument("--batch", type=int, default=DEFAULT_BATCH,
                     help="Samples per measurement batch (default 500, ~360 s)")
-    ap.add_argument("--save-samples", action="store_true",
-                    help="Write every raw sample to <log>_samples.csv for distribution analysis")
+    ap.add_argument("--save-samples", action="store_true", default=True,
+                    help="(always on) Write every raw sample to <log>_samples.csv")
     ap.add_argument("--slave-port", default=None,
                     help="Also log Chimp (slave) serial output concurrently to <log>_slave.csv")
     args = ap.parse_args()
@@ -176,8 +176,7 @@ def main() -> None:
     print(f"  Port        : {args.port}")
     print(f"  Batch size  : {args.batch} samples (~{args.batch * 0.72 / 60:.0f} min each)")
     print(f"  Log file    : {log_path.name}")
-    if args.save_samples:
-        print(f"  Samples log : {samples_path.name}")
+    print(f"  Samples log : {samples_path.name}")
     if args.slave_port:
         print(f"  Slave port  : {args.slave_port}  → {slave_path.name}")
     print("=" * 60)
@@ -212,13 +211,10 @@ def main() -> None:
         writer.writeheader()
         f.flush()
 
-        sample_f = None
-        sample_writer = None
-        if args.save_samples:
-            sample_f = open(samples_path, "w", newline="")
-            sample_writer = csv.DictWriter(sample_f, fieldnames=sample_fieldnames)
-            sample_writer.writeheader()
-            sample_f.flush()
+        sample_f = open(samples_path, "w", newline="")
+        sample_writer = csv.DictWriter(sample_f, fieldnames=sample_fieldnames)
+        sample_writer.writeheader()
+        sample_f.flush()
 
         try:
             while True:
@@ -285,8 +281,7 @@ def main() -> None:
         except KeyboardInterrupt:
             pass
 
-        if sample_f is not None:
-            sample_f.close()
+        sample_f.close()
 
     slave_stop.set()
     if slave_thread:
@@ -294,8 +289,7 @@ def main() -> None:
 
     ser.close()
     print(f"\n[sweep] {batch_n} batches written → {log_path}")
-    if args.save_samples:
-        print(f"[sweep] samples written → {samples_path}")
+    print(f"[sweep] samples written → {samples_path}")
     if batch_n >= 3:
         print("\n  Paste the CSV into the regression notebook or run:")
         print(f"  python3 -c \"\nimport csv,statistics as s\n"
