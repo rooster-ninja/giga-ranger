@@ -229,6 +229,104 @@ use; it is documented here to explain the result, not to be trusted as a calibra
 
 ---
 
+## ⚠️ Critical: AGC Discrete Gain-State Switching (2026-07-19)
+
+### Observation
+
+During an 80 dB bench sweep (CAL=13382, Alpha master, ACM2), the ranging mean and RSSI register
+jumped simultaneously between batch 14 and batch 15 with no change to hardware or temperature:
+
+| Batch | die_c | RSSI (dBm) | mean_m | σ (m) | rej |
+|-------|-------|-----------|--------|-------|-----|
+| 12 | 39.6 | −30.6 | +1.559 | 0.680 | 2 |
+| 13 | 39.6 | −30.8 | +1.565 | 0.554 | 2 |
+| **14** | **38.6** | **−31.1** | **+1.330** | **0.703** | **42** |
+| **15** | **38.6** | **−41.7** | **+4.433** | **0.649** | **1** |
+| 16 | 38.6 | −41.8 | +4.419 | 0.633 | 2 |
+| 17 | 38.6 | −41.8 | +4.813 | 0.647 | 1 |
+
+Three things changed simultaneously at a single batch boundary:
+- **RSSI**: −31.1 → −41.7 dBm (clean +10.6 dBm step)
+- **Mean**: +1.33 → +4.43 m (+3.10 m jump)
+- **Rejects**: 42 → 1 (back to baseline)
+
+Temperature at the boundary (38.6°C) was identical on both sides. Setup unchanged.
+
+### Two discrete operating states
+
+The system oscillates between two mutually exclusive lock modes across the full 19-batch run:
+
+| State | RSSI | Mean | σ | Rej/batch | Batches |
+|-------|------|------|---|-----------|---------|
+| A (wrong lock) | −41.6 to −41.8 dBm | 4.4–5.1 m | ~0.63 m | 0–2 | 1–6, 15–19 |
+| B (correct lock) | −30.6 to −32.2 dBm | 1.3–5.2 m (falling) | ~0.65 m | 0–2 (42 at transition) | 7–14 |
+
+Within each state, σ ≈ 0.6 m and rejects are near-zero — single-cluster distributions, not
+mixed. The 42 rejects in batch 14 were the mid-batch B→A transition: samples from both states
+within one 500-sample window, producing a bimodal distribution that the IQR filter partially
+separated. The mean was falling within State B (AGC settling after the A→B transition at
+batch 6→7). State A is stable at ~4.5–5 m. State B converges toward ~1.3 m then snaps back.
+
+### Hypothesis: discrete AGC gain-state transition
+
+The SX1280 AGC selects from a set of discrete LNA gain steps (Table 4-2: 1–13). At the 80 dB
+bench operating point (~−67 dBm received), the signal sits near an AGC threshold. When the
+AGC switches between two adjacent gain steps:
+
+1. **Amplitude change:** Different gain → different received amplitude → different REG_RANGING_RSSI
+   value. The +10.6 dBm RSSI step matches a plausible ~2 gain-step transition.
+
+2. **Group delay change:** Each gain step has a different propagation delay through the RF front
+   end. A gain-step switch shifts the effective signal arrival time seen by the ranging correlator,
+   directly shifting the measured ToF → +3.1 m jump in apparent range at 0.02253 m/count.
+
+This also explains the two 80 dB sessions disagreeing (−38.5 dBm in session 1 vs −31 dBm in
+session 2 and State B of session 3): each session locked into a different AGC gain state near
+startup and stayed there — internally consistent per session, not comparable across sessions.
+
+**SX1280 gain control architecture (datasheet Section 4.2):**
+- Two LNA regimes: Low Power Mode (default, AGC capped below top 3 gain steps) and
+  High Sensitivity Mode (register 0x0891 bits 7:6 = 0x3, unlocks top 3 steps, +3 dB NF)
+- Manual gain: three register writes per Table 4-1 —
+  `0x089F bit 7 = 1`, `0x0895 bit 0 = 1`, `0x089E bits 3:0 = step (1–13)`
+- No documented readback of "current AGC gain step" in driver headers, but `0x089E` is
+  readable and returns the current step value when AGC is active
+
+### Test: gain step readback (2026-07-19)
+
+**Firmware change (commit 054c20e):** `read_radio_state()` now reads both REG_RANGING_RSSI
+(0x0964) and REG_GAIN_VALUE (0x089E bits 3:0) in one STANDBY_XOSC window after each exchange.
+CSV gains a `gain_step` column. Stats line reports mode gain step per 500-sample batch.
+
+**`FIXED_GAIN` define added:** Set to 0 (AGC auto, default) or 1–13 to lock a specific step.
+Use 0 first to characterize which steps AGC selects at each attenuation level, then lock
+once the correct step per attenuation regime is identified.
+
+**Expected result if hypothesis is correct:**
+- `gain_step` column will show two distinct values correlating exactly with State A and State B
+- The RSSI jump will coincide with a `gain_step` integer change at the transition batch
+- Samples file (--save-samples) will show gain_step flipping within the transition batch
+
+**Expected result if hypothesis is wrong:**
+- `gain_step` will be constant across the A/B transition
+- The RSSI/mean jump occurs with no corresponding gain step change
+- Root cause is elsewhere in the ranging state machine (correlator lock, crystal mode, etc.)
+
+### Planned fix
+
+Once the gain step associated with each state is known:
+
+1. Set `FIXED_GAIN` to the step used by the "correct lock" state (State B, ~1.3 m mean).
+2. Re-run thermal sweep at 80 dB to confirm mean stabilises at the correct lock value.
+3. Extend the same approach to all characterisation attenuation levels so each has a
+   known, stable gain setting for the bias curve measurement.
+
+**Note on gain choice for 40 dB bench:** At −27 dBm received, even the lowest gain step gives
+ample SNR. Locking to the same step used at 80 dB may cause overload at 40 dB; verify
+there is no saturation before locking gain across attenuation levels.
+
+---
+
 ## REG_RANGING_RSSI (0x0964) — Convention Note (2026-07-19)
 
 **For web publication:** The formula and convention for this register are non-obvious and worth documenting.
