@@ -238,7 +238,9 @@ static float do_ranging(bool master) {
     read_pkt_status();
     read_instant_rssi();
     read_radio_state();
-    if (result == 0.0f) return NAN;
+    if (!isr_fired)  return NAN;    // timed out — exchange never completed
+    if (!master)     return 0.0f;   // slave: exchange completed, no range measurement
+    if (result == 0.0f) return NAN; // master: unexpected zero
     return result;
 }
 
@@ -522,6 +524,10 @@ void loop() {
         }
         a_miss = 0;
 
+        // startRanging() sets packet type to RANGING — switch back to LoRa for TELEM receive
+        radio.begin(CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, 5, 0x12, CAL_TX_DBM);
+        apply_gain();
+
         // Receive TELEM from Chimp
         g_chimp = {};
         rx_arm();
@@ -647,16 +653,18 @@ void loop() {
     case C_RANGING_INFO: {
         // Continuous ranging + telemetry transmit to Alpha
         float result = do_ranging(false);
+        bool exchange_ok = !isnan(result);  // 0.0f = slave exchange completed
 
-        if (isnan(result)) {
+        if (!exchange_ok) {
             c_miss++;
             if (c_miss >= 5) { chimp_link_lost(); return; }
-        } else {
-            c_miss = 0;
+            break;  // skip TELEM/log on timeout; retry ranging next loop()
         }
+        c_miss = 0;
 
-        // Delay to let Alpha finish post-ranging reads and enter startReceive
-        delay(35);
+        // Wait for Alpha to call radio.begin() + apply_gain() + startReceive()
+        // (Alpha must switch from RANGING packet type back to LoRa RX — needs ~130 ms)
+        delay(150);
 
         // Pack and send TELEM
         {

@@ -278,9 +278,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port",       default="/dev/ttyACM2",
-                    help="Serial port for master (Alpha) board")
-    ap.add_argument("--slave-port", default=None,
-                    help="Serial port for Chimp (slave) — logged concurrently")
+                    help="Serial port for Alpha (master) board (default: /dev/ttyACM2)")
+    ap.add_argument("--slave-port", default="/dev/ttyACM1",
+                    help="Serial port for Chimp (slave) board (default: /dev/ttyACM1)")
     ap.add_argument("--pio",        default="pio",
                     help="Path to pio binary (default: pio)")
     ap.add_argument("--from-gain",  type=int, default=13,
