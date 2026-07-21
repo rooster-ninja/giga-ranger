@@ -553,7 +553,7 @@ void loop() {
         if (isnan(m)) {
             a_miss++;
             if (a_miss >= 5) { alpha_link_lost(); return; }
-            delay(EXCHANGE_GAP_MS);
+            delay(20);
             return;
         }
         a_miss = 0;
