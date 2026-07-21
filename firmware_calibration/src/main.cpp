@@ -37,8 +37,6 @@
 #define METERS_PER_COUNT  0.1803f
 
 // ── Run parameters ────────────────────────────────────────────────────────────
-#define EXCHANGE_GAP_MS  20
-#define CPU_BURN_MS     400
 #define RANGE_TIMEOUT_MS 300
 
 // ── Gain control ──────────────────────────────────────────────────────────────
@@ -93,12 +91,6 @@ SX1280 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
 Adafruit_BME280 bme;
 static bool bme_ok = false;
 
-// Burn core 0 to drive die temp up (matches production thermal load)
-static void burn_core0(void *) {
-    volatile uint32_t x = 0;
-    while (true) { for (int i = 0; i < 50000; i++) x++; vTaskDelay(1); }
-}
-
 // ── ISR ───────────────────────────────────────────────────────────────────────
 volatile bool isr_fired = false;
 IRAM_ATTR void onDio1() { isr_fired = true; }
@@ -136,6 +128,50 @@ static void spi_write_raw(uint16_t addr, uint8_t val) {
     digitalWrite(RADIO_NSS, HIGH);
     SPI.endTransaction();
     delayMicroseconds(5);
+}
+
+// Switch radio back to LoRa packet type + modulation params without a full hardware reset.
+// startRanging() leaves the chip in RANGING packet type; startReceive() after that
+// will try to receive a ranging frame, not a LoRa frame.  Call this before rx_arm()
+// when transitioning from ranging back to LoRa RX.
+static void switch_to_lora() {
+    radio.standby();
+    uint32_t t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 10) {}
+
+    SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+
+    // SetPacketType = LoRa (0x01)
+    digitalWrite(RADIO_NSS, LOW);
+    SPI.transfer(0x8A);
+    t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 5) {}
+    SPI.transfer(0x01);
+    digitalWrite(RADIO_NSS, HIGH);
+    delayMicroseconds(100);
+    t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 5) {}
+
+    // SetModulationParams: SF9 (0x90), BW1625 (0x0A), CR4/5 (0x01)
+    digitalWrite(RADIO_NSS, LOW);
+    SPI.transfer(0x8B);
+    t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 5) {}
+    SPI.transfer(0x90); SPI.transfer(0x0A); SPI.transfer(0x01);
+    digitalWrite(RADIO_NSS, HIGH);
+    delayMicroseconds(100);
+    t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 5) {}
+
+    // SetPacketParams: preamble=12, explicit header, payload=255, CRC on, IQ normal
+    digitalWrite(RADIO_NSS, LOW);
+    SPI.transfer(0x8C);
+    t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 5) {}
+    SPI.transfer(0x00); SPI.transfer(0x0C);  // preamble 12 symbols
+    SPI.transfer(0x00);                       // explicit header
+    SPI.transfer(0xFF);                       // max payload
+    SPI.transfer(0x20);                       // CRC on
+    SPI.transfer(0x40);                       // IQ standard
+    SPI.transfer(0x00);
+    digitalWrite(RADIO_NSS, HIGH);
+
+    SPI.endTransaction();
+    delayMicroseconds(100);
 }
 
 // GetPacketStatus (0x1D): updates g_rssi_sync and g_snr.
@@ -400,8 +436,6 @@ void setup() {
     Serial.begin(115200);
     delay(3000);
 
-    xTaskCreatePinnedToCore(burn_core0, "burn0", 1024, nullptr, 1, nullptr, 0);
-
     Wire1.begin(BME_SDA, BME_SCL);
     bme_ok = bme.begin(BME_ADDR, &Wire1);
     if (!bme_ok) bme_ok = bme.begin(0x77, &Wire1);
@@ -524,8 +558,8 @@ void loop() {
         }
         a_miss = 0;
 
-        // startRanging() sets packet type to RANGING — switch back to LoRa for TELEM receive
-        radio.begin(CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, 5, 0x12, CAL_TX_DBM);
+        // startRanging() leaves radio in RANGING packet type — switch back to LoRa for TELEM
+        switch_to_lora();
         apply_gain();
 
         // Receive TELEM from Chimp
@@ -572,8 +606,8 @@ void loop() {
             rx_arm();
         }
 
-        delay(EXCHANGE_GAP_MS);
-        { volatile uint32_t x = 0; uint32_t t0 = millis(); while (millis()-t0 < CPU_BURN_MS) x++; }
+        // Give Chimp time to re-enter ranging slave mode after its TELEM+apply_gain cycle
+        delay(60);
         break;
     }
 
@@ -662,9 +696,8 @@ void loop() {
         }
         c_miss = 0;
 
-        // Wait for Alpha to call radio.begin() + apply_gain() + startReceive()
-        // (Alpha must switch from RANGING packet type back to LoRa RX — needs ~130 ms)
-        delay(150);
+        // Wait for Alpha to finish switch_to_lora() + apply_gain() (~10 ms total)
+        delay(60);
 
         // Pack and send TELEM
         {
