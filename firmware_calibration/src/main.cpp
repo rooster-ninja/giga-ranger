@@ -1,13 +1,12 @@
-// SX1280 Ranging Calibration — LILYGO T3-S3 V1.3
+// SX1280 Ranging Calibration + LoRa Link Protocol — LILYGO T3-S3 V1.3
 //
-// Procedure:
-//   1. Connect boards: [Master]──atten──coax──atten──[Slave]
-//   2. Flash master board:  pio run -e master -t upload
-//   3. Flash slave board:   pio run -e slave  -t upload
-//   4. Open serial monitor on master (115200)
-//   5. Record CalibrationValue printed at end of run
-//   6. Swap roles (re-flash with -e slave / -e master), repeat, average the two values
-//   7. Write averaged CalibrationValue to production firmware via radio.setRangingCalibration()
+// Protocol phases:
+//   LORA_LINK:    Chimp broadcasts CONNECT_REQ → Alpha accepts → ping/pong heartbeat
+//   RANGING_INFO: User sends "start" → Alpha commands Chimp → continuous ranging loop
+//
+// Alpha serial commands: start / stop
+// CSV header printed on RANGING_INFO entry; comment lines (#) at all times.
+// BLE stubs (ble_read_cmd / ble_notify) wired later; OLED in a future commit.
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -25,82 +24,94 @@
 #define RADIO_MOSI   6
 
 // ── RF parameters ─────────────────────────────────────────────────────────────
-// Must match production firmware exactly — CalibrationValue is SF-specific
 #define CAL_FREQ_MHZ  2450.0f
 #define CAL_BW_KHZ    1625.0f
 #define CAL_SF            9
-#define CAL_TX_DBM       13     // Must match RF_TX_DBM in production firmware exactly.
-                                // (13 dBm - 40 dB atten = -27 dBm at RX — within linear range)
-                                // WARNING: board has PA FEM — never exceed +5 dBm conducted
+#define CAL_TX_DBM       13
 
-// Ranging address — must match on both boards
-#define RANGING_ADDR  0xDEADBEEF
-
-// ── Cable parameters ──────────────────────────────────────────────────────────
-// DigiKey J10302-ND / 415-0031-M1.0
-// Jacket marking: JAN M17/113-RG316 MIL-DTL-17, Amphenol CIT
-// RG-316 VF = 0.695 (MIL-DTL-17 Type RG-316/U specification)
-#define CABLE_PHYS_M   1.0f      // physical length in metres
-#define CABLE_VF       0.695f    // RG-316 velocity factor (MIL-DTL-17 spec, confirmed from jacket)
-#define CABLE_ELEC_M   (CABLE_PHYS_M * CABLE_VF)
-
-// Empirical conversion: 0.1803 m per raw SX1280 ranging count
-// Source: StuartsProjects 40 km field test; cross-check after initial radiated test
-#define METERS_PER_COUNT  0.1803f  // SF9, BW=1625 kHz: c/(2×1625000×2^9)
+// ── Ranging parameters ────────────────────────────────────────────────────────
+#define RANGING_ADDR      0xDEADBEEF
+#define CABLE_PHYS_M      1.0f
+#define CABLE_VF          0.695f
+#define CABLE_ELEC_M      (CABLE_PHYS_M * CABLE_VF)
+#define METERS_PER_COUNT  0.1803f
 
 // ── Run parameters ────────────────────────────────────────────────────────────
-#define N_SAMPLES       500
-#define EXCHANGE_GAP_MS  20      // delay between exchanges (ms)
-#define CPU_BURN_MS     400      // busy-loop after each exchange to match production thermal load
-#define TIMEOUT_MS     2000      // per-exchange timeout
+#define EXCHANGE_GAP_MS  20
+#define CPU_BURN_MS     400
+#define RANGE_TIMEOUT_MS 300
 
-// ── AGC / Gain control ────────────────────────────────────────────────────────
-// FIXED_GAIN: 0 = let AGC run freely (default for 40 dB bench calibration).
-//             1-13 = lock to this gain step per SX1280 Table 4-2 (13=max sensitivity, 1=min).
-//             Use 0 for initial characterisation; set a fixed value once the correct step
-//             per-attenuation level is known to eliminate discrete gain-state transitions.
+// ── Gain control ──────────────────────────────────────────────────────────────
+// 0 = AGC, 1-13 = manual gain step
 #define FIXED_GAIN  10
 
-// Calibration table: AN1200.89 factory baseline. SF9/BW1625 = [2][4] = 13430.
-// Compensates for SX1280 internal processing latency. Adjust [2][4] iteratively
-// until mean ≈ CABLE_ELEC_M (0.695 m). Formula: new_cal = old_cal + CalVal × 8.06
+// ── Calibration table ─────────────────────────────────────────────────────────
+// SF9/BW1625 = CAL_TABLE[2][4] = 13296
+// Alpha master + new Chimp slave — calibrated 2026-07-20, gain=10, 40dB bench
 static const uint16_t CAL_TABLE[3][6] = {
     { 10299, 10271, 10244, 10242, 10230, 10246 },
     { 11486, 11474, 11453, 11426, 11417, 11401 },
-    { 13308, 13493, 13528, 13515, 13296, 13376 },  // SF9 [2][4] = 13296: Alpha master + new Chimp slave — calibrated 2026-07-20, gain=10 fixed, 40dB bench, amb 28.8°C die 38.6°C, sigma=0.61m
+    { 13308, 13493, 13528, 13515, 13296, 13376 },
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Packet type bytes ─────────────────────────────────────────────────────────
+#define PKT_CONNECT_REQ  0x05
+#define PKT_CONNECT_ACK  0x06
+#define PKT_PING         0x01
+#define PKT_PONG         0x02
+#define PKT_START        0x10
+#define PKT_START_ACK    0x11
+#define PKT_STOP         0x20
+#define PKT_STOP_ACK     0x21
+#define PKT_TELEM        0xAB
 
+// Control packets: { type, seq, t_ms[4] } = 6 bytes
+struct __attribute__((packed)) PktCtrl {
+    uint8_t  type;
+    uint8_t  seq;
+    uint32_t t_ms;
+};
+
+// Telemetry packet from Chimp → Alpha, 8 bytes
+struct __attribute__((packed)) PktTelem {
+    uint8_t type;          // PKT_TELEM
+    uint8_t inst_rssi_raw; // GetInstantRSSI  → -raw/2 dBm
+    uint8_t rssi_sync_raw; // GetPacketStatus byte 0 → -raw/2 dBm
+    int8_t  snr_raw;       // GetPacketStatus byte 1 × 4 → raw/4 dB
+    uint8_t rssi_corr_raw; // REG_RANGING_RSSI 0x0964 → -raw/2 dBm
+    uint8_t gain_step;     // REG_GAIN_VALUE bits 3:0
+    uint8_t freq_hi;       // freq error 0x09F6
+    uint8_t freq_lo;       // freq error 0x09F7
+};
+
+// ── Hardware ──────────────────────────────────────────────────────────────────
 #define BME_SDA  21
 #define BME_SCL  10
 #define BME_ADDR 0x76
-
-// Continuous burn on core 0 to maximise die temp
-static void burn_core0(void *) {
-    volatile uint32_t x = 0;
-    while (true) {
-        for (int i = 0; i < 50000; i++) x++;
-        vTaskDelay(1);  // 1ms sleep — lets idle task reset watchdog
-    }
-}
 
 SX1280 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
 Adafruit_BME280 bme;
 static bool bme_ok = false;
 
-volatile bool isr_fired = false;
-static float   g_rssi      = 0.0f;   // REG_RANGING_RSSI 0x0964 — correlation peak amplitude (inverted: more negative = stronger)
-static float   g_rssi_sync = 0.0f;   // GetPacketStatus RssiSync — RSSI at sync-word detection
-static float   g_snr       = 0.0f;   // GetPacketStatus SnrPkt — per-exchange SNR in dB
-static uint8_t g_gain_step = 0;      // REG_GAIN_VALUE 0x089E bits 3:0 — AGC/manual gain step 1-13
-
-IRAM_ATTR void onDio1() {
-    isr_fired = true;
+// Burn core 0 to drive die temp up (matches production thermal load)
+static void burn_core0(void *) {
+    volatile uint32_t x = 0;
+    while (true) { for (int i = 0; i < 50000; i++) x++; vTaskDelay(1); }
 }
 
-// ── Low-level SPI helpers (chip must be in STANDBY_XOSC when called) ──────────
+// ── ISR ───────────────────────────────────────────────────────────────────────
+volatile bool isr_fired = false;
+IRAM_ATTR void onDio1() { isr_fired = true; }
 
+// ── Per-exchange radio state globals ──────────────────────────────────────────
+static float   g_rssi      = 0.0f;   // REG_RANGING_RSSI (inverted: more negative = stronger)
+static float   g_rssi_sync = 0.0f;   // GetPacketStatus RssiSync (dead on master in ranging)
+static float   g_snr       = 0.0f;   // GetPacketStatus SnrPkt   (dead on master in ranging)
+static uint8_t g_gain_step = 0;      // REG_GAIN_VALUE bits 3:0
+static float   g_inst_rssi   = 0.0f; // GetInstantRSSI (0x15)
+static float   g_freq_err_hz = 0.0f; // Freq error reg 0x09F5-7, Hz
+
+// ── Low-level SPI helpers ─────────────────────────────────────────────────────
 static uint8_t spi_read_raw(uint16_t addr) {
     SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
     digitalWrite(RADIO_NSS, LOW);
@@ -127,18 +138,17 @@ static void spi_write_raw(uint16_t addr, uint8_t val) {
     delayMicroseconds(5);
 }
 
-// GetPacketStatus (0x1D): reads RssiSync (byte 0) and SnrPkt (byte 1, signed) from the last
-// ranging exchange. Must be called immediately after getRangingResult(), before any state
-// transition, while the packet status registers are still valid.
-// Updates g_rssi_sync (dBm, standard convention: more negative = weaker) and g_snr (dB).
+// GetPacketStatus (0x1D): updates g_rssi_sync and g_snr.
+// Dead on master in ranging mode (returns 0/0); alive on slave.
+// Call before any state transition after getRangingResult().
 static void read_pkt_status() {
     SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
     digitalWrite(RADIO_NSS, LOW);
-    SPI.transfer(0x1D);                          // GetPacketStatus opcode
+    SPI.transfer(0x1D);
     uint32_t t = millis();
     while (digitalRead(RADIO_BUSY) && millis() - t < 5) {}
-    uint8_t rs = SPI.transfer(0x00);             // RssiSync (unsigned)
-    int8_t  sn = (int8_t)SPI.transfer(0x00);     // SnrPkt (signed, dB × 4)
+    uint8_t rs = SPI.transfer(0x00);
+    int8_t  sn = (int8_t)SPI.transfer(0x00);
     digitalWrite(RADIO_NSS, HIGH);
     SPI.endTransaction();
     delayMicroseconds(5);
@@ -146,17 +156,32 @@ static void read_pkt_status() {
     g_snr       = (float)sn / 4.0f;
 }
 
-// Reads REG_RANGING_RSSI (0x0964) and REG_GAIN_VALUE (0x089E) in one STANDBY_XOSC window.
-// Must be called immediately after getRangingResult(); getRangingResult() enables the
-// ranging clock (reg 0x097F bit 1) which gates the RSSI register read.
-// Updates g_rssi (dBm, inverted convention: more negative = stronger) and g_gain_step (1-13).
+// GetInstantRSSI (0x15): instantaneous RSSI from last reception.
+// Call before any state transition after getRangingResult().
+static void read_instant_rssi() {
+    SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(RADIO_NSS, LOW);
+    SPI.transfer(0x15);
+    uint32_t t = millis();
+    while (digitalRead(RADIO_BUSY) && millis() - t < 5) {}
+    uint8_t raw = SPI.transfer(0x00);
+    digitalWrite(RADIO_NSS, HIGH);
+    SPI.endTransaction();
+    delayMicroseconds(5);
+    g_inst_rssi = (raw == 0) ? 0.0f : -(float)raw / 2.0f;
+}
+
+// Reads REG_RANGING_RSSI, REG_GAIN_VALUE, and freq error (0x09F5-7) in one STANDBY_XOSC window.
 static void read_radio_state() {
     radio.standby(RADIOLIB_SX128X_STANDBY_XOSC);
     uint32_t t = millis();
     while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
 
-    uint8_t rssi_raw = spi_read_raw(0x0964);  // REG_RANGING_RSSI
-    uint8_t gain_raw = spi_read_raw(0x089E);  // REG_GAIN_VALUE (bits 3:0 = step 1-13)
+    uint8_t rssi_raw = spi_read_raw(0x0964);
+    uint8_t gain_raw = spi_read_raw(0x089E);
+    uint8_t fe_h     = spi_read_raw(0x09F5);
+    uint8_t fe_m     = spi_read_raw(0x09F6);
+    uint8_t fe_l     = spi_read_raw(0x09F7);
 
     t = millis();
     while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
@@ -164,30 +189,41 @@ static void read_radio_state() {
 
     g_rssi      = (rssi_raw == 0) ? 0.0f : -(float)rssi_raw / 2.0f;
     g_gain_step = gain_raw & 0x0F;
+
+    int32_t fe_raw = ((int32_t)(fe_h & 0x0F) << 16) | ((int32_t)fe_m << 8) | fe_l;
+    if (fe_raw & 0x80000) fe_raw |= (int32_t)0xFFF00000;
+    g_freq_err_hz = (float)fe_raw * (1625000.0f / 8388608.0f);
 }
 
-// If FIXED_GAIN > 0, locks the SX1280 to a specific gain step (SX1280 Table 4-1).
-// Must be called after radio.begin() and before first ranging exchange.
-static void setup_gain() {
+// Re-apply manual gain after any LoRa mode switch (setPacketType may reset registers).
+static void apply_gain() {
 #if FIXED_GAIN > 0
     radio.standby(RADIOLIB_SX128X_STANDBY_XOSC);
     uint32_t t = millis();
     while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
-    spi_write_raw(0x089F, spi_read_raw(0x089F) | 0x80);           // enable manual gain (bit 7)
-    spi_write_raw(0x0895, spi_read_raw(0x0895) | 0x01);           // enable manual gain (bit 0)
-    spi_write_raw(0x089E, (spi_read_raw(0x089E) & 0xF0) | (FIXED_GAIN & 0x0F));  // set step
-    uint8_t actual = spi_read_raw(0x089E) & 0x0F;
+    spi_write_raw(0x089F, spi_read_raw(0x089F) | 0x80);
+    spi_write_raw(0x0895, spi_read_raw(0x0895) | 0x01);
+    spi_write_raw(0x089E, (spi_read_raw(0x089E) & 0xF0) | (FIXED_GAIN & 0x0F));
     t = millis();
     while (digitalRead(RADIO_BUSY) && millis() - t < 10) {}
     radio.standby();
-    Serial.printf("# gain: MANUAL step=%d (verified 0x089E[3:0]=%d)\n", FIXED_GAIN, actual);
+#endif
+}
+
+// One-time gain setup at boot; prints diagnostic.
+static void setup_gain() {
+#if FIXED_GAIN > 0
+    apply_gain();
+    uint8_t actual = spi_read_raw(0x089E) & 0x0F;
+    Serial.printf("# gain: MANUAL step=%d (0x089E[3:0]=%d)\n", FIXED_GAIN, actual);
 #else
     Serial.println("# gain: AGC auto");
 #endif
 }
 
-// Blocking ranging exchange with timeout. Returns measured distance (m) or NAN on failure.
-float do_ranging(bool master) {
+// Ranging exchange with timeout. Returns distance (m) or NAN on failure.
+// Updates g_rssi_sync, g_snr, g_inst_rssi, g_rssi, g_gain_step, g_freq_err_hz.
+static float do_ranging(bool master) {
     isr_fired = false;
     radio.setDio1Action(onDio1);
     int state = radio.startRanging(master, RANGING_ADDR, CAL_TABLE);
@@ -195,130 +231,481 @@ float do_ranging(bool master) {
         Serial.printf("# startRanging err %d\n", state);
         return NAN;
     }
-
-    // Wait for ISR or fixed ceiling — DIO1 may not be mapped for ranging events
     unsigned long t0 = millis();
-    while (!isr_fired && millis() - t0 < 300) yield();
+    while (!isr_fired && millis() - t0 < RANGE_TIMEOUT_MS) yield();
 
     float result = radio.getRangingResult();
-    read_pkt_status();               // updates g_rssi_sync and g_snr (before state transition)
-    read_radio_state();              // updates g_rssi and g_gain_step
-    if (result == 0.0f) return NAN;  // discard uninitialized register (startup artifact)
+    read_pkt_status();
+    read_instant_rssi();
+    read_radio_state();
+    if (result == 0.0f) return NAN;
     return result;
 }
+
+// ── Non-blocking serial command reader ────────────────────────────────────────
+static String _serial_buf;
+static String poll_cmd() {
+    while (Serial.available()) {
+        char c = (char)Serial.read();
+        if (c == '\n' || c == '\r') {
+            String cmd = _serial_buf;
+            _serial_buf = "";
+            cmd.trim();
+            cmd.toLowerCase();
+            if (cmd.length() > 0) return cmd;
+        } else {
+            _serial_buf += c;
+        }
+    }
+    return "";
+}
+
+// ── BLE stubs (wire NimBLE characteristics here later) ────────────────────────
+static String ble_read_cmd()           { return ""; }
+static void   ble_notify(const char*)  {}
+
+// ── Helper: send a 6-byte control packet ──────────────────────────────────────
+static void send_ctrl(uint8_t type, uint8_t seq) {
+    PktCtrl p = { type, seq, (uint32_t)millis() };
+    radio.transmit((uint8_t*)&p, sizeof(p));
+}
+
+// ── Helper: startReceive with fresh ISR flag ──────────────────────────────────
+static void rx_arm() {
+    isr_fired = false;
+    radio.setDio1Action(onDio1);
+    radio.startReceive();
+}
+
+// ── Helper: wait for DIO1 with timeout, return true if fired ─────────────────
+static bool rx_wait(uint32_t timeout_ms) {
+    uint32_t t0 = millis();
+    while (!isr_fired && millis() - t0 < timeout_ms) yield();
+    return isr_fired;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+#ifdef CAL_MASTER
+// ═════════════════════════════════════════════════════════════════════════════
+//  ALPHA (MASTER)
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum AlphaState { A_LISTENING, A_LORA_LINK, A_RANGING_INFO };
+static AlphaState a_state = A_LISTENING;
+static int     a_miss     = 0;
+static uint8_t a_ping_seq = 0;
+static uint32_t a_last_ping = 0;
+
+// Decoded Chimp telemetry (updated each exchange when PKT_TELEM received)
+static struct {
+    float   inst_rssi, rssi_sync, snr, rssi_corr, freq_err;
+    uint8_t gain;
+    bool    ok;
+} g_chimp = {};
+
+static float g_lora_rssi = 0.0f;
+static float g_lora_snr  = 0.0f;
+
+static void print_master_row(unsigned long t, float m, float die, float amb) {
+    char s_amb[12];
+    if (isnan(amb)) strcpy(s_amb, "NA");
+    else snprintf(s_amb, sizeof(s_amb), "%.2f", amb);
+
+    // First 10 always-present fields
+    Serial.printf("%lu,%.4f,%.1f,%s,%.1f,%d,%.1f,%.1f,%.1f,%.0f",
+        t, m, die, s_amb,
+        g_rssi, g_gain_step, g_snr, g_rssi_sync,
+        g_inst_rssi, g_freq_err_hz);
+
+    // Last 8 conditional fields (empty when PKT_TELEM missed)
+    if (g_chimp.ok) {
+        Serial.printf(",%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%.0f",
+            g_lora_rssi, g_lora_snr,
+            g_chimp.inst_rssi, g_chimp.rssi_sync, g_chimp.snr,
+            g_chimp.rssi_corr, (unsigned)g_chimp.gain, g_chimp.freq_err);
+    } else {
+        Serial.print(",,,,,,,,");
+    }
+    Serial.println();
+}
+
+static void alpha_enter_ranging_info() {
+    a_state = A_RANGING_INFO;
+    a_miss  = 0;
+    Serial.println("# MODE: RANGING_INFO");
+    ble_notify("MODE: RANGING_INFO");
+    Serial.println("t_ms,raw_m,die_c,amb_c,rssi_dbm,gain_step,snr_db,rssi_sync,"
+                   "inst_rssi_dbm,freq_err_hz,lora_rssi_dbm,lora_snr_db,"
+                   "chimp_inst_rssi_dbm,chimp_rssi_sync_dbm,chimp_snr_db,"
+                   "chimp_rssi_corr_dbm,chimp_gain_step,chimp_freq_err_hz");
+    apply_gain();
+}
+
+static void alpha_send_start() {
+    for (int r = 0; r < 3; r++) {
+        send_ctrl(PKT_START, (uint8_t)r);
+        rx_arm();
+        if (rx_wait(1000)) {
+            uint8_t rx[16] = {};
+            if (radio.readData(rx, 16) == RADIOLIB_ERR_NONE && rx[0] == PKT_START_ACK) {
+                alpha_enter_ranging_info();
+                return;
+            }
+        }
+        Serial.printf("# START retry %d\n", r + 1);
+    }
+    Serial.println("# START failed — no ACK from Chimp");
+    rx_arm();
+}
+
+static void alpha_link_lost() {
+    Serial.println("# LINK LOST");
+    ble_notify("LINK LOST");
+    a_state = A_LISTENING;
+    a_miss  = 0;
+    rx_arm();
+}
+
+#endif  // CAL_MASTER
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+#ifndef CAL_MASTER
+// ═════════════════════════════════════════════════════════════════════════════
+//  CHIMP (SLAVE)
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum ChimpState { C_SEEKING, C_LORA_LINK, C_RANGING_INFO };
+static ChimpState c_state    = C_SEEKING;
+static int        c_miss     = 0;
+static uint8_t    c_req_seq  = 0;
+static uint32_t   c_last_req = 0;
+static uint32_t   c_last_rx  = 0;   // timestamp of last received packet in LORA_LINK
+
+static void chimp_link_lost() {
+    Serial.println("# LINK LOST — returning to SEEK");
+    c_state    = C_SEEKING;
+    c_miss     = 0;
+    c_last_req = 0;
+}
+
+#endif  // !CAL_MASTER
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 void setup() {
     Serial.begin(115200);
     delay(3000);
 
     xTaskCreatePinnedToCore(burn_core0, "burn0", 1024, nullptr, 1, nullptr, 0);
+
     Wire1.begin(BME_SDA, BME_SCL);
     bme_ok = bme.begin(BME_ADDR, &Wire1);
     if (!bme_ok) bme_ok = bme.begin(0x77, &Wire1);
-    Serial.printf("BME280: %s\n", bme_ok ? "OK" : "NA");
+    Serial.printf("# BME280: %s\n", bme_ok ? "OK" : "NA");
 
     SPI.begin(SPI_SCK, RADIO_MISO, RADIO_MOSI, RADIO_NSS);
 
-    Serial.println("\n=== SX1280 Ranging Calibration ===");
-    Serial.printf("RF:    %.0f MHz  BW=%.0f kHz  SF%d  %d dBm\n",
+    Serial.println("\n=== SX1280 Ranging Calibration / LoRa Link ===");
+    Serial.printf("# RF: %.0f MHz  BW=%.0f kHz  SF%d  %d dBm\n",
         CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, CAL_TX_DBM);
-    Serial.printf("Cable: %.3f m physical  VF=%.3f  → %.4f m electrical\n\n",
-        CABLE_PHYS_M, CABLE_VF, CABLE_ELEC_M);
+    Serial.printf("# CAL[2][4]: %u\n", CAL_TABLE[2][4]);
 
-    // 0x12 = standard LoRa private-network sync word (RadioLib default for SX128x)
     int state = radio.begin(CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, 5, 0x12, CAL_TX_DBM);
     if (state != RADIOLIB_ERR_NONE) {
         Serial.printf("[FATAL] radio.begin() failed: %d\n", state);
-        Serial.println("Check: SPI wiring, NSS/BUSY/RST pins, power.");
         while (true) delay(1000);
     }
-    Serial.println("Radio OK");
+    Serial.println("# Radio OK");
     radio.setDio1Action(onDio1);
-
-    setup_gain();  // AGC or manual, per FIXED_GAIN
+    setup_gain();
 
 #ifdef CAL_MASTER
-    // ── MASTER — free-run, no sample limit (temperature calibration) ───────────
-    Serial.println("Role: MASTER (Alpha)");
-    Serial.printf("Cable: %.4f m electrical  CAL=%d\n", CABLE_ELEC_M, CAL_TABLE[2][4]);
-    Serial.println("t_ms,raw_m,die_c,amb_c,rssi_dbm,gain_step,snr_db,rssi_sync");
+    Serial.println("# Role: ALPHA (master)");
+    Serial.println("# Listening for Chimp CONNECT_REQ…");
+    Serial.println("# Commands: start / stop");
+    rx_arm();
+#else
+    Serial.println("# Role: CHIMP (slave)");
+    Serial.println("# Seeking Alpha…");
+    c_last_req = 0;
+    c_last_rx  = millis();
+#endif
+}
 
-    double sum = 0.0, sum_sq = 0.0, sum_rssi = 0.0;
-    uint16_t gain_hist[16] = {};   // histogram for gain step mode
-    int ok = 0, err = 0, outlier = 0;
+// ─────────────────────────────────────────────────────────────────────────────
 
-    while (true) {
+void loop() {
+#ifdef CAL_MASTER
+    // ── ALPHA STATE MACHINE ───────────────────────────────────────────────────
+
+    switch (a_state) {
+
+    case A_LISTENING: {
+        // Waiting for Chimp to broadcast PKT_CONNECT_REQ
+        if (!isr_fired) return;
+        isr_fired = false;
+        uint8_t rx[16] = {};
+        if (radio.readData(rx, 16) == RADIOLIB_ERR_NONE && rx[0] == PKT_CONNECT_REQ) {
+            float rssi = radio.getRSSI();
+            float snr  = radio.getSNR();
+            send_ctrl(PKT_CONNECT_ACK, rx[1]);
+            a_state = A_LORA_LINK;
+            a_miss  = 0;
+            a_last_ping = 0;
+            char msg[64];
+            snprintf(msg, sizeof(msg), "# LINK ESTABLISHED rssi=%.1f snr=%.1f", rssi, snr);
+            Serial.println(msg);
+            ble_notify(msg);
+            apply_gain();
+        }
+        rx_arm();
+        break;
+    }
+
+    case A_LORA_LINK: {
+        // Heartbeat: ping Chimp every 500 ms, log RF metrics
+        if (millis() - a_last_ping >= 500) {
+            a_last_ping = millis();
+
+            send_ctrl(PKT_PING, a_ping_seq++);
+            rx_arm();
+            bool got_pong = rx_wait(400);
+
+            if (got_pong) {
+                uint8_t rx[16] = {};
+                if (radio.readData(rx, 16) == RADIOLIB_ERR_NONE && rx[0] == PKT_PONG) {
+                    float rssi = radio.getRSSI();
+                    float snr  = radio.getSNR();
+                    uint32_t rtt = millis() - a_last_ping;
+                    char msg[80];
+                    snprintf(msg, sizeof(msg), "# LINK seq=%d rtt=%lums rssi=%.1f snr=%.1f",
+                             (int)a_ping_seq - 1, rtt, rssi, snr);
+                    Serial.println(msg);
+                    ble_notify(msg);
+                    a_miss = 0;
+                } else {
+                    a_miss++;
+                }
+            } else {
+                a_miss++;
+            }
+
+            if (a_miss >= 5) { alpha_link_lost(); return; }
+
+            // Re-arm RX between pings
+            rx_arm();
+        }
+
+        // Check for user command
+        String cmd = poll_cmd();
+        if (cmd.length() == 0) cmd = ble_read_cmd();
+        if (cmd == "start") {
+            alpha_send_start();
+        }
+        break;
+    }
+
+    case A_RANGING_INFO: {
+        // Continuous ranging exchange — one CSV row per exchange
         float m   = do_ranging(true);
         float die = (float)temperatureRead();
         float amb = bme_ok ? bme.readTemperature() : NAN;
         unsigned long t = millis();
 
-        if (!isnan(m)) {
-            if (m < -100.0f || m > 2000.0f) {
-                Serial.printf("# outlier %.4f die=%.1f rssi=%.1f gain=%d\n",
-                    m, die, g_rssi, g_gain_step);
-                outlier++;
-            } else {
-                if (isnan(amb))
-                    Serial.printf("%lu,%.4f,%.1f,NA,%.1f,%d,%.1f,%.1f\n",
-                        t, m, die, g_rssi, g_gain_step, g_snr, g_rssi_sync);
-                else
-                    Serial.printf("%lu,%.4f,%.1f,%.2f,%.1f,%d,%.1f,%.1f\n",
-                        t, m, die, amb, g_rssi, g_gain_step, g_snr, g_rssi_sync);
-                sum      += m;
-                sum_sq   += (double)m * m;
-                sum_rssi += g_rssi;
-                if (g_gain_step < 16) gain_hist[g_gain_step]++;
-                ok++;
-            }
-        } else {
-            Serial.printf("# timeout t=%lu\n", t);
-            err++;
+        if (isnan(m)) {
+            a_miss++;
+            if (a_miss >= 5) { alpha_link_lost(); return; }
+            delay(EXCHANGE_GAP_MS);
+            return;
         }
+        a_miss = 0;
 
-        if (ok > 0 && ok % 500 == 0) {
-            double mean_m  = sum / ok;
-            double var     = (sum_sq / ok) - (mean_m * mean_m);
-            double sigma_m = sqrt(var < 0.0 ? 0.0 : var);
-            float  cal_val = (float)((mean_m - CABLE_ELEC_M) / METERS_PER_COUNT);
-            float  mean_rssi = (float)(sum_rssi / ok);
-            // Mode gain step
-            uint8_t mode_gain = 0;
-            uint16_t mode_cnt = 0;
-            for (int i = 1; i < 16; i++) {
-                if (gain_hist[i] > mode_cnt) { mode_cnt = gain_hist[i]; mode_gain = i; }
+        // Receive TELEM from Chimp
+        g_chimp = {};
+        rx_arm();
+        if (rx_wait(200)) {
+            PktTelem pl{};
+            if (radio.readData((uint8_t*)&pl, sizeof(pl)) == RADIOLIB_ERR_NONE
+                    && pl.type == PKT_TELEM) {
+                g_lora_rssi = radio.getRSSI();
+                g_lora_snr  = radio.getSNR();
+                auto u2f = [](uint8_t r) -> float { return r ? -(float)r / 2.0f : 0.0f; };
+                g_chimp.inst_rssi  = u2f(pl.inst_rssi_raw);
+                g_chimp.rssi_sync  = u2f(pl.rssi_sync_raw);
+                g_chimp.snr        = (float)(int8_t)pl.snr_raw / 4.0f;
+                g_chimp.rssi_corr  = u2f(pl.rssi_corr_raw);
+                g_chimp.gain       = pl.gain_step;
+                g_chimp.freq_err   = (float)(int16_t)((pl.freq_hi << 8) | pl.freq_lo)
+                                     * (1625000.0f / 65536.0f);
+                g_chimp.ok = true;
             }
-            Serial.printf("# [n=%d] mean=%.4f m  sigma=%.4f m  rssi=%.1f dBm  snr=%.1f dB  rssi_sync=%.1f dBm  gain=%d  die=%.1f C  CalVal=%.0f\n",
-                ok, mean_m, sigma_m, mean_rssi, g_snr, g_rssi_sync, mode_gain, die, cal_val);
-            // Reset accumulators for next batch
-            sum = 0.0; sum_sq = 0.0; sum_rssi = 0.0;
-            memset(gain_hist, 0, sizeof(gain_hist));
+        }
+        apply_gain();
+
+        // Log row — all fields, immediately
+        if (m < -100.0f || m > 2000.0f)
+            Serial.printf("# outlier %.4f\n", m);
+        print_master_row(t, m, die, amb);
+
+        // Check for stop command
+        String cmd = poll_cmd();
+        if (cmd.length() == 0) cmd = ble_read_cmd();
+        if (cmd == "stop") {
+            send_ctrl(PKT_STOP, 0);
+            rx_arm();
+            rx_wait(500);   // wait briefly for STOP_ACK (consume or ignore)
+            if (isr_fired) { uint8_t rx[16]={}; radio.readData(rx, 16); }
+            a_state = A_LORA_LINK;
+            a_miss  = 0;
+            a_last_ping = 0;
+            apply_gain();
+            Serial.println("# MODE: LORA_LINK");
+            ble_notify("MODE: LORA_LINK");
+            rx_arm();
         }
 
         delay(EXCHANGE_GAP_MS);
-        { volatile uint32_t x = 0; uint32_t t0 = millis(); while (millis() - t0 < CPU_BURN_MS) x++; }
+        { volatile uint32_t x = 0; uint32_t t0 = millis(); while (millis()-t0 < CPU_BURN_MS) x++; }
+        break;
     }
 
-#else
-    // ── SLAVE ─────────────────────────────────────────────────────────────────
-    Serial.println("Role: SLAVE (responder)");
-    Serial.println("t_ms,die_c,amb_c,rssi_dbm,gain_step,snr_db,rssi_sync");
-#endif
-}
+    }  // switch a_state
 
-void loop() {
-#ifndef CAL_MASTER
-    do_ranging(false);
-    // No CPU burn on slave — slave must cycle at ~350 ms so it is always in RX
-    // when the master fires its 300 ms ranging window.  Master and slave at equal
-    // burn times (~720 ms each) phase-lock and produce long runs of stale reads.
-    float die = (float)temperatureRead();
-    float amb = bme_ok ? bme.readTemperature() : NAN;
-    if (isnan(amb))
-        Serial.printf("%lu,%.1f,NA,%.1f,%d,%.1f,%.1f\n",
-            millis(), die, g_rssi, g_gain_step, g_snr, g_rssi_sync);
-    else
-        Serial.printf("%lu,%.1f,%.2f,%.1f,%d,%.1f,%.1f\n",
-            millis(), die, amb, g_rssi, g_gain_step, g_snr, g_rssi_sync);
-#endif
+#else
+    // ── CHIMP STATE MACHINE ───────────────────────────────────────────────────
+
+    switch (c_state) {
+
+    case C_SEEKING: {
+        // Broadcast CONNECT_REQ every 500 ms; listen for CONNECT_ACK
+        if (millis() - c_last_req >= 500) {
+            c_last_req = millis();
+            send_ctrl(PKT_CONNECT_REQ, c_req_seq++);
+            Serial.printf("# SEEK seq=%d\n", (int)c_req_seq - 1);
+
+            rx_arm();
+            if (rx_wait(400)) {
+                uint8_t rx[16] = {};
+                if (radio.readData(rx, 16) == RADIOLIB_ERR_NONE
+                        && rx[0] == PKT_CONNECT_ACK) {
+                    c_state   = C_LORA_LINK;
+                    c_miss    = 0;
+                    c_last_rx = millis();
+                    Serial.println("# LINKED to Alpha");
+                    apply_gain();
+                    rx_arm();   // listen for first PING
+                    return;
+                }
+            }
+            // No ACK — stay in C_SEEKING, loop will retry after 500 ms
+        }
+        break;
+    }
+
+    case C_LORA_LINK: {
+        // Connection-loss timeout: if no packet received for 3 s, return to seeking
+        if (millis() - c_last_rx > 3000) {
+            chimp_link_lost();
+            return;
+        }
+
+        if (!isr_fired) return;   // stay in RX, nothing to do yet
+        isr_fired = false;
+
+        uint8_t rx[16] = {};
+        if (radio.readData(rx, 16) != RADIOLIB_ERR_NONE) {
+            rx_arm(); return;
+        }
+        float rssi = radio.getRSSI();
+        float snr  = radio.getSNR();
+        c_last_rx  = millis();
+        c_miss     = 0;
+
+        if (rx[0] == PKT_PING) {
+            send_ctrl(PKT_PONG, rx[1]);
+            Serial.printf("# LINK rssi=%.1f snr=%.1f\n", rssi, snr);
+            rx_arm();
+
+        } else if (rx[0] == PKT_START) {
+            send_ctrl(PKT_START_ACK, rx[1]);
+            c_state = C_RANGING_INFO;
+            c_miss  = 0;
+            Serial.println("# MODE: RANGING_INFO");
+            Serial.println("t_ms,die_c,amb_c,rssi_dbm,gain_step,snr_db,rssi_sync,"
+                           "inst_rssi_dbm,freq_err_hz");
+            apply_gain();
+            // Do NOT re-arm startReceive — next loop() enters do_ranging(false)
+
+        } else {
+            rx_arm();   // unknown packet type, re-arm
+        }
+        break;
+    }
+
+    case C_RANGING_INFO: {
+        // Continuous ranging + telemetry transmit to Alpha
+        float result = do_ranging(false);
+
+        if (isnan(result)) {
+            c_miss++;
+            if (c_miss >= 5) { chimp_link_lost(); return; }
+        } else {
+            c_miss = 0;
+        }
+
+        // Delay to let Alpha finish post-ranging reads and enter startReceive
+        delay(35);
+
+        // Pack and send TELEM
+        {
+            int16_t fe16 = (int16_t)(g_freq_err_hz * 65536.0f / 1625000.0f);
+            PktTelem pl{};
+            pl.type          = PKT_TELEM;
+            pl.inst_rssi_raw = (g_inst_rssi  < 0.f) ? (uint8_t)(-g_inst_rssi  * 2.f) : 0;
+            pl.rssi_sync_raw = (g_rssi_sync  < 0.f) ? (uint8_t)(-g_rssi_sync  * 2.f) : 0;
+            pl.snr_raw       = (int8_t)(g_snr * 4.f);
+            pl.rssi_corr_raw = (g_rssi       < 0.f) ? (uint8_t)(-g_rssi       * 2.f) : 0;
+            pl.gain_step     = g_gain_step;
+            pl.freq_hi       = (uint8_t)(((uint16_t)fe16 >> 8) & 0xFF);
+            pl.freq_lo       = (uint8_t)((uint16_t)fe16 & 0xFF);
+            radio.transmit((uint8_t*)&pl, sizeof(pl));
+        }
+        apply_gain();
+
+        // Log slave CSV row immediately
+        float die = (float)temperatureRead();
+        float amb = bme_ok ? bme.readTemperature() : NAN;
+        if (isnan(amb))
+            Serial.printf("%lu,%.1f,NA,%.1f,%d,%.1f,%.1f,%.1f,%.0f\n",
+                millis(), die, g_rssi, g_gain_step, g_snr, g_rssi_sync,
+                g_inst_rssi, g_freq_err_hz);
+        else
+            Serial.printf("%lu,%.1f,%.2f,%.1f,%d,%.1f,%.1f,%.1f,%.0f\n",
+                millis(), die, amb, g_rssi, g_gain_step, g_snr, g_rssi_sync,
+                g_inst_rssi, g_freq_err_hz);
+
+        // Brief RX window to catch PKT_STOP from Alpha
+        rx_arm();
+        if (rx_wait(30)) {
+            uint8_t rx[16] = {};
+            if (radio.readData(rx, 16) == RADIOLIB_ERR_NONE && rx[0] == PKT_STOP) {
+                send_ctrl(PKT_STOP_ACK, rx[1]);
+                c_state   = C_LORA_LINK;
+                c_miss    = 0;
+                c_last_rx = millis();
+                Serial.println("# MODE: LORA_LINK");
+                apply_gain();
+                rx_arm();
+                return;
+            }
+        }
+        // No STOP — go straight back into do_ranging(false) next loop()
+        break;
+    }
+
+    }  // switch c_state
+
+#endif  // !CAL_MASTER
 }

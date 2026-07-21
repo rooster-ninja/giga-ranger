@@ -22,7 +22,11 @@ Output CSV columns:
     batch, time_utc, cal, die_c, amb_c, rssi_dbm, mean_m, sigma_m, n_raw, n_rejected
 
 With --save-samples: also writes <logname>_samples.csv with every raw sample tagged
-    by batch number. Columns: batch, t_ms, raw_m, die_c, amb_c, rssi_dbm, kept
+    by batch number. Columns include all per-exchange RF metrics from the LoRa telemetry
+    exchange (inst_rssi_dbm, freq_err_hz, lora_rssi_dbm, lora_snr_db, chimp_* fields).
+
+Note: the board must be in RANGING_INFO mode (type "start" in the Alpha serial terminal)
+before ranging CSV rows will appear. This script passively reads whatever is on the port.
 
 Requires: pip install pyserial
 """
@@ -48,21 +52,45 @@ DEFAULT_BATCH   = 500
 DEFAULT_PORT    = "/dev/ttyACM1"
 DEFAULT_CAL     = 13316
 
-# Matches individual master CSV rows: t_ms,raw_m,die_c,amb_c,rssi_dbm[,gain_step[,snr_db]]
-# amb_c may be "NA" when BME280 is absent.
-# gain_step and snr_db are optional — absent in older firmware versions.
+# Matches the mandatory first 6 fields of master CSV rows (split-based parser below)
 _ROW_RE = re.compile(
-    r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+)'
-    r'(?:,(\d+)(?:,([+-]?\d+\.\d+)(?:,([+-]?\d+\.\d+))?)?)?'
+    r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+),(\d+)'
 )
-# groups: 1=t_ms  2=raw_m  3=die_c  4=amb_c  5=rssi  6=gain_step  7=snr_db  8=rssi_sync
 
-# Matches slave CSV rows: t_ms,die_c,amb_c,rssi_dbm,gain_step,snr_db,rssi_sync
+def _parse_master_line(line: str) -> dict | None:
+    if not _ROW_RE.match(line):
+        return None
+    p = line.split(',')
+    def f(i): return float(p[i]) if len(p) > i and p[i].strip() else float('nan')
+    def iv(i): return int(p[i]) if len(p) > i and p[i].strip() else 0
+    return {
+        't_ms':                p[0],
+        'raw_m':               float(p[1]),
+        'die_c':               float(p[2]),
+        'amb_c':               float('nan') if p[3] == 'NA' else float(p[3]),
+        'rssi_dbm':            float(p[4]),
+        'gain_step':           int(p[5]),
+        'snr_db':              f(6),
+        'rssi_sync':           f(7),
+        'inst_rssi_dbm':       f(8),
+        'freq_err_hz':         f(9),
+        'lora_rssi_dbm':       f(10),
+        'lora_snr_db':         f(11),
+        'chimp_inst_rssi_dbm': f(12),
+        'chimp_rssi_sync_dbm': f(13),
+        'chimp_snr_db':        f(14),
+        'chimp_rssi_corr_dbm': f(15),
+        'chimp_gain_step':     iv(16),
+        'chimp_freq_err_hz':   f(17),
+    }
+
+# Slave CSV: t_ms,die_c,amb_c,rssi_dbm,gain_step,snr_db[,rssi_sync[,inst_rssi_dbm[,freq_err_hz]]]
 _SLAVE_RE = re.compile(
     r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+),(\d+),([+-]?\d+\.\d+)'
-    r'(?:,([+-]?\d+\.\d+))?'
+    r'(?:,([+-]?\d+\.\d+)(?:,([+-]?\d+\.\d+)(?:,([+-]?\d+\.\d+))?)?)?'
 )
-# groups: 1=t_ms  2=die_c  3=amb_c  4=rssi  5=gain_step  6=snr_db  7=rssi_sync
+# groups: 1=t_ms 2=die_c 3=amb_c 4=rssi 5=gain_step 6=snr_db
+#         7=rssi_sync 8=inst_rssi_dbm 9=freq_err_hz
 
 
 def process_batch(rows: list[tuple], cal: int, batch_n: int) -> tuple[dict, list[bool]]:
@@ -112,7 +140,7 @@ def process_batch(rows: list[tuple], cal: int, batch_n: int) -> tuple[dict, list
 def _slave_logger(port: str, log_path: Path, stop_event: threading.Event) -> None:
     """Background thread: read Chimp slave CSV rows and write to log_path."""
     fieldnames = ["time_utc", "t_ms", "die_c", "amb_c", "rssi_dbm",
-                  "gain_step", "snr_db", "rssi_sync"]
+                  "gain_step", "snr_db", "rssi_sync", "inst_rssi_dbm", "freq_err_hz"]
     try:
         ser = serial.Serial(port, 115200, timeout=3.0)
         time.sleep(2.5)
@@ -129,14 +157,16 @@ def _slave_logger(port: str, log_path: Path, stop_event: threading.Event) -> Non
                 m = _SLAVE_RE.match(line)
                 if m:
                     writer.writerow({
-                        "time_utc":  datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-                        "t_ms":      m.group(1),
-                        "die_c":     m.group(2),
-                        "amb_c":     m.group(3),
-                        "rssi_dbm":  m.group(4),
-                        "gain_step": m.group(5),
-                        "snr_db":    m.group(6),
-                        "rssi_sync": m.group(7) if m.group(7) is not None else "",
+                        "time_utc":       datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                        "t_ms":           m.group(1),
+                        "die_c":          m.group(2),
+                        "amb_c":          m.group(3),
+                        "rssi_dbm":       m.group(4),
+                        "gain_step":      m.group(5),
+                        "snr_db":         m.group(6),
+                        "rssi_sync":      m.group(7) if m.group(7) else "",
+                        "inst_rssi_dbm":  m.group(8) if m.group(8) else "",
+                        "freq_err_hz":    m.group(9) if m.group(9) else "",
                     })
                     f.flush()
         ser.close()
@@ -167,8 +197,15 @@ def main() -> None:
 
     fieldnames = ["batch", "time_utc", "cal", "die_c", "amb_c", "rssi_dbm", "gain_step",
                   "mean_m", "sigma_m", "n_raw", "n_rejected"]
-    sample_fieldnames = ["batch", "t_ms", "raw_m", "die_c", "amb_c", "rssi_dbm",
-                         "gain_step", "snr_db", "kept"]
+    sample_fieldnames = [
+        "batch", "t_ms", "raw_m", "die_c", "amb_c", "rssi_dbm",
+        "gain_step", "snr_db", "rssi_sync",
+        "inst_rssi_dbm", "freq_err_hz",
+        "lora_rssi_dbm", "lora_snr_db",
+        "chimp_inst_rssi_dbm", "chimp_rssi_sync_dbm", "chimp_snr_db",
+        "chimp_rssi_corr_dbm", "chimp_gain_step", "chimp_freq_err_hz",
+        "kept",
+    ]
 
     print("=" * 60)
     print("  SX1280 Thermal Regression Sweep")
@@ -222,28 +259,15 @@ def main() -> None:
                 if not raw:
                     continue
                 line = raw.decode("ascii", errors="replace").strip()
-                m = _ROW_RE.match(line)
-                if not m:
+                row = _parse_master_line(line)
+                if not row:
                     continue
-                t_ms_str  = m.group(1)
-                amb_str   = m.group(4)
-                gain_str  = m.group(6)
-                snr_str   = m.group(7)
-                rsync_str = m.group(8)
-                rows.append((
-                    float(m.group(2)),                                        # raw_m
-                    float(m.group(3)),                                        # die_c
-                    float(amb_str) if amb_str != 'NA' else float('nan'),      # amb_c
-                    float(m.group(5)),                                        # rssi_dbm
-                    int(gain_str) if gain_str is not None else 0,             # gain_step
-                    t_ms_str,                                                 # t_ms
-                    float(snr_str) if snr_str is not None else float('nan'),  # snr_db
-                    float(rsync_str) if rsync_str is not None else float('nan'),  # rssi_sync
-                ))
+                rows.append(row)
 
                 if len(rows) >= args.batch:
                     batch_n += 1
-                    data_rows = [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+                    data_rows = [(r['raw_m'], r['die_c'], r['amb_c'], r['rssi_dbm'], r['gain_step'])
+                                 for r in rows]
                     try:
                         result, kept_mask = process_batch(data_rows, args.cal, batch_n)
                     except RuntimeError as e:
@@ -255,18 +279,30 @@ def main() -> None:
                     f.flush()
 
                     if sample_writer is not None:
-                        for i, row in enumerate(rows):
-                            raw_m, die_c, amb_c, rssi_dbm, gain_step, t_ms, snr_db, rssi_sync = row
+                        for i, r in enumerate(rows):
+                            def _ff(v): return f"{v:.1f}" if not math.isnan(v) else ""
+                            def _f0(v): return f"{v:.0f}" if not math.isnan(v) else ""
                             sample_writer.writerow({
-                                "batch":      batch_n,
-                                "t_ms":       t_ms,
-                                "raw_m":      f"{raw_m:.4f}",
-                                "die_c":      f"{die_c:.1f}",
-                                "amb_c":      f"{amb_c:.2f}" if not math.isnan(amb_c) else "NA",
-                                "rssi_dbm":   f"{rssi_dbm:.1f}",
-                                "gain_step":  gain_step,
-                                "snr_db":     f"{snr_db:.1f}" if not math.isnan(snr_db) else "",
-                                "kept":       "1" if kept_mask[i] else "0",
+                                "batch":               batch_n,
+                                "t_ms":                r['t_ms'],
+                                "raw_m":               f"{r['raw_m']:.4f}",
+                                "die_c":               f"{r['die_c']:.1f}",
+                                "amb_c":               f"{r['amb_c']:.2f}" if not math.isnan(r['amb_c']) else "NA",
+                                "rssi_dbm":            f"{r['rssi_dbm']:.1f}",
+                                "gain_step":           r['gain_step'],
+                                "snr_db":              _ff(r['snr_db']),
+                                "rssi_sync":           _ff(r['rssi_sync']),
+                                "inst_rssi_dbm":       _ff(r['inst_rssi_dbm']),
+                                "freq_err_hz":         _f0(r['freq_err_hz']),
+                                "lora_rssi_dbm":       _ff(r['lora_rssi_dbm']),
+                                "lora_snr_db":         _ff(r['lora_snr_db']),
+                                "chimp_inst_rssi_dbm": _ff(r['chimp_inst_rssi_dbm']),
+                                "chimp_rssi_sync_dbm": _ff(r['chimp_rssi_sync_dbm']),
+                                "chimp_snr_db":        _ff(r['chimp_snr_db']),
+                                "chimp_rssi_corr_dbm": _ff(r['chimp_rssi_corr_dbm']),
+                                "chimp_gain_step":     r['chimp_gain_step'],
+                                "chimp_freq_err_hz":   _f0(r['chimp_freq_err_hz']),
+                                "kept":                "1" if kept_mask[i] else "0",
                             })
                         sample_f.flush()
 

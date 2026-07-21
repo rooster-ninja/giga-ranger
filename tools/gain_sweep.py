@@ -3,9 +3,10 @@
 gain_sweep.py — Multi-pass gain sweep for SX1280 ranging bias characterisation.
 
 Iterates through gain steps 13→1, then 1→13, then 13→1 (configurable number of
-passes, alternating direction). Flashes master at each step, collects N_SAMPLES
-ranging exchanges, logs per-sample and per-step summary CSVs. Optionally logs
-Chimp (slave) serial output concurrently throughout the entire run.
+passes, alternating direction). Flashes master at each step, waits for the LoRa link
+to establish between Alpha and Chimp, sends "start" to begin ranging, collects
+N_SAMPLES exchanges, sends "stop", logs per-sample and per-step summary CSVs.
+Optionally logs Chimp (slave) serial output concurrently throughout the entire run.
 
 Usage (from giga_ranger root):
     python3 tools/gain_sweep.py --port /dev/ttyACM2 --pio ~/.local/bin/pio
@@ -42,19 +43,55 @@ ASSETS_DIR = SCRIPT_DIR.parent / "Assets"
 
 TARGET_M   = 0.695
 N_SAMPLES  = 500
-TIMEOUT_S  = 450  # 500 samples × ~0.72 s + margin
+DATA_TIMEOUT_S = 450  # 500 samples × ~0.82 s + margin
+LINK_TIMEOUT_S = 30   # time to wait for LoRa link establishment
 
-_CSV_RE = re.compile(
+# Matches the first 6 mandatory master CSV fields:
+# t_ms,raw_m,die_c,amb_c,rssi_dbm,gain_step
+_CSV_PREFIX = re.compile(
     r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+),(\d+)'
-    r'(?:,([+-]?\d+\.\d+)(?:,([+-]?\d+\.\d+))?)?'
 )
-# groups: 1=t_ms  2=raw_m  3=die_c  4=amb_c  5=rssi  6=gain_step  7=snr_db  8=rssi_sync
+
+# Master CSV column map (0-indexed after split):
+# 0  t_ms             1  raw_m           2  die_c          3  amb_c
+# 4  rssi_dbm         5  gain_step       6  snr_db         7  rssi_sync
+# 8  inst_rssi_dbm    9  freq_err_hz     10 lora_rssi_dbm  11 lora_snr_db
+# 12 chimp_inst_rssi  13 chimp_rssi_sync 14 chimp_snr      15 chimp_rssi_corr
+# 16 chimp_gain_step  17 chimp_freq_err
+
+def parse_master_line(line: str) -> dict | None:
+    if not _CSV_PREFIX.match(line):
+        return None
+    p = line.split(',')
+    def f(i): return float(p[i]) if len(p) > i and p[i].strip() else float('nan')
+    def iv(i): return int(p[i]) if len(p) > i and p[i].strip() else 0
+    return {
+        't_ms':                p[0],
+        'raw_m':               float(p[1]),
+        'die_c':               float(p[2]),
+        'amb_c':               float('nan') if p[3] == 'NA' else float(p[3]),
+        'rssi_dbm':            float(p[4]),
+        'gain_step':           int(p[5]),
+        'snr_db':              f(6),
+        'rssi_sync':           f(7),
+        'inst_rssi_dbm':       f(8),
+        'freq_err_hz':         f(9),
+        'lora_rssi_dbm':       f(10),
+        'lora_snr_db':         f(11),
+        'chimp_inst_rssi_dbm': f(12),
+        'chimp_rssi_sync_dbm': f(13),
+        'chimp_snr_db':        f(14),
+        'chimp_rssi_corr_dbm': f(15),
+        'chimp_gain_step':     iv(16),
+        'chimp_freq_err_hz':   f(17),
+    }
 
 _SLAVE_RE = re.compile(
     r'^(\d+),([+-]?\d+\.\d+),([+-]?\d+\.\d+|NA),([+-]?\d+\.\d+),(\d+),([+-]?\d+\.\d+)'
-    r'(?:,([+-]?\d+\.\d+))?'
+    r'(?:,([+-]?\d+\.\d+)(?:,([+-]?\d+\.\d+)(?:,([+-]?\d+\.\d+))?)?)?'
 )
-# groups: 1=t_ms  2=die_c  3=amb_c  4=rssi  5=gain_step  6=snr_db  7=rssi_sync
+# groups: 1=t_ms 2=die_c 3=amb_c 4=rssi 5=gain_step 6=snr_db
+#         7=rssi_sync 8=inst_rssi_dbm 9=freq_err_hz
 
 
 def set_fixed_gain(gain: int) -> None:
@@ -80,59 +117,95 @@ def flash(port: str, pio: str) -> None:
 
 def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
     """
-    Collect N_SAMPLES CSV rows from master serial port.
-    Returns (summary_dict, raw_samples) or (None, None) if insufficient samples.
+    Open serial port to Alpha, wait for LoRa link, send "start", collect N_SAMPLES
+    ranging exchanges, send "stop". Returns (summary_dict, raw_samples) or (None, None).
     """
-    print(f"[serial] Collecting {N_SAMPLES} samples (~{N_SAMPLES * 0.72 / 60:.0f} min)…")
+    print(f"[serial] Connecting {port}…")
     ser = serial.Serial(port, 115200, timeout=3.0)
-    time.sleep(2.5)
+    time.sleep(2.0)   # wait for board reset after USB CDC connect
     ser.reset_input_buffer()
 
-    # (raw_m, rssi, gain, t_ms, die_c, amb_c, snr_db, rssi_sync)
-    samples: list[tuple] = []
-    deadline = time.time() + TIMEOUT_S
+    # Ensure we're not mid-ranging from a previous run
+    ser.write(b"stop\n")
+    time.sleep(0.5)
+    ser.reset_input_buffer()
+
+    # Wait for LoRa link establishment
+    print(f"[serial] Waiting for LoRa link (≤{LINK_TIMEOUT_S}s)…")
+    link_ok = False
+    deadline = time.time() + LINK_TIMEOUT_S
+    while time.time() < deadline:
+        raw = ser.readline()
+        if not raw:
+            continue
+        line = raw.decode("ascii", errors="replace").strip()
+        if line:
+            print(f"  {line}")
+        if "LINK ESTABLISHED" in line or "LINK seq=" in line or "LINK rssi=" in line:
+            link_ok = True
+            break
+
+    if not link_ok:
+        print("[serial] LoRa link not established within timeout")
+        ser.close()
+        return None, None
+
+    # Send start command
+    ser.write(b"start\n")
+    print("[serial] Sent 'start', waiting for RANGING_INFO header…")
+
+    header_ok = False
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        raw = ser.readline()
+        if not raw:
+            continue
+        line = raw.decode("ascii", errors="replace").strip()
+        if line:
+            print(f"  {line}")
+        if "t_ms,raw_m" in line:
+            header_ok = True
+            break
+
+    if not header_ok:
+        print("[serial] RANGING_INFO header not received")
+        ser.close()
+        return None, None
+
+    print(f"[serial] Collecting {N_SAMPLES} samples (~{N_SAMPLES * 0.82 / 60:.0f} min)…")
+    samples: list[dict] = []
+    deadline = time.time() + DATA_TIMEOUT_S
 
     while time.time() < deadline and len(samples) < N_SAMPLES:
         raw = ser.readline()
         if not raw:
             continue
         line = raw.decode("ascii", errors="replace").strip()
-        # Only print non-data lines (stats, errors) to keep output manageable
-        if line and not _CSV_RE.match(line):
+        if line and not _CSV_PREFIX.match(line):
             print(f"  {line}")
-        m = _CSV_RE.match(line)
-        if m:
-            amb_str   = m.group(4)
-            snr_str   = m.group(7)
-            rsync_str = m.group(8)
-            samples.append((
-                float(m.group(2)),                                           # raw_m
-                float(m.group(5)),                                           # rssi
-                int(m.group(6)),                                             # gain
-                m.group(1),                                                  # t_ms
-                float(m.group(3)),                                           # die_c
-                float(amb_str) if amb_str != "NA" else float("nan"),         # amb_c
-                float(snr_str) if snr_str is not None else float("nan"),     # snr_db
-                float(rsync_str) if rsync_str is not None else float("nan"), # rssi_sync
-            ))
-            # Print progress every 100 samples
+        row = parse_master_line(line)
+        if row:
+            samples.append(row)
             n = len(samples)
             if n % 100 == 0:
-                print(f"  [{n}/{N_SAMPLES}] rssi={samples[-1][1]:.1f} gain={samples[-1][2]}")
+                print(f"  [{n}/{N_SAMPLES}] rssi={row['rssi_dbm']:.1f} gain={row['gain_step']}")
 
+    # Send stop
+    ser.write(b"stop\n")
+    time.sleep(1.5)
     ser.close()
 
     if len(samples) < 50:
         print(f"  [warn] Only {len(samples)} samples — signal likely lost at this gain step")
         return None, None
 
-    raw_m = [s[0] for s in samples]
-    n_raw = len(raw_m)
+    raw_m_vals = [s['raw_m'] for s in samples]
+    n_raw = len(raw_m_vals)
 
-    q1, _, q3 = st.quantiles(raw_m, n=4)
+    q1, _, q3 = st.quantiles(raw_m_vals, n=4)
     iqr = q3 - q1
     lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
-    kept_mask = [lo <= r <= hi for r in raw_m]
+    kept_mask = [lo <= r <= hi for r in raw_m_vals]
     clean = [s for s, k in zip(samples, kept_mask) if k]
     n_rej = n_raw - len(clean)
 
@@ -140,9 +213,9 @@ def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
         print(f"  [warn] Too few clean samples after filter: {len(clean)}/{n_raw}")
         return None, None
 
-    clean_m    = [s[0] for s in clean]
-    clean_rssi = [s[1] for s in clean]
-    clean_gain = [s[2] for s in clean]
+    clean_m    = [s['raw_m']    for s in clean]
+    clean_rssi = [s['rssi_dbm'] for s in clean]
+    clean_gain = [s['gain_step'] for s in clean]
     gain_mode  = Counter(clean_gain).most_common(1)[0][0]
 
     summary = {
@@ -154,20 +227,12 @@ def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
         "n_rej":     n_rej,
     }
 
-    raw_rows = [
-        {
-            "t_ms":      s[3],
-            "raw_m":     f"{s[0]:.4f}",
-            "die_c":     f"{s[4]:.1f}",
-            "amb_c":     f"{s[5]:.2f}" if not math.isnan(s[5]) else "NA",
-            "rssi_dbm":  f"{s[1]:.1f}",
-            "gain_step": s[2],
-            "snr_db":    f"{s[6]:.1f}" if not math.isnan(s[6]) else "",
-            "rssi_sync": f"{s[7]:.1f}" if not math.isnan(s[7]) else "",
-            "kept":      "1" if kept_mask[i] else "0",
-        }
-        for i, s in enumerate(samples)
-    ]
+    # Build raw_rows: add kept flag, preserve all columns
+    raw_rows = []
+    for i, s in enumerate(samples):
+        row = {k: v for k, v in s.items()}
+        row['kept'] = "1" if kept_mask[i] else "0"
+        raw_rows.append(row)
 
     return summary, raw_rows
 
@@ -175,7 +240,7 @@ def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
 def _slave_logger(port: str, log_path: Path, stop_event: threading.Event) -> None:
     """Background thread: read Chimp slave CSV rows and write to log_path."""
     fieldnames = ["time_utc", "t_ms", "die_c", "amb_c", "rssi_dbm",
-                  "gain_step", "snr_db", "rssi_sync"]
+                  "gain_step", "snr_db", "rssi_sync", "inst_rssi_dbm", "freq_err_hz"]
     try:
         ser = serial.Serial(port, 115200, timeout=3.0)
         time.sleep(2.5)
@@ -192,14 +257,16 @@ def _slave_logger(port: str, log_path: Path, stop_event: threading.Event) -> Non
                 m = _SLAVE_RE.match(line)
                 if m:
                     writer.writerow({
-                        "time_utc":  datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-                        "t_ms":      m.group(1),
-                        "die_c":     m.group(2),
-                        "amb_c":     m.group(3),
-                        "rssi_dbm":  m.group(4),
-                        "gain_step": m.group(5),
-                        "snr_db":    m.group(6),
-                        "rssi_sync": m.group(7) if m.group(7) is not None else "",
+                        "time_utc":       datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                        "t_ms":           m.group(1),
+                        "die_c":          m.group(2),
+                        "amb_c":          m.group(3),
+                        "rssi_dbm":       m.group(4),
+                        "gain_step":      m.group(5),
+                        "snr_db":         m.group(6),
+                        "rssi_sync":      m.group(7) if m.group(7) else "",
+                        "inst_rssi_dbm":  m.group(8) if m.group(8) else "",
+                        "freq_err_hz":    m.group(9) if m.group(9) else "",
                     })
                     f.flush()
         ser.close()
@@ -211,9 +278,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port",       default="/dev/ttyACM2",
-                    help="Serial port for master board")
+                    help="Serial port for master (Alpha) board")
     ap.add_argument("--slave-port", default=None,
-                    help="Serial port for Chimp (slave) board — logged concurrently")
+                    help="Serial port for Chimp (slave) — logged concurrently")
     ap.add_argument("--pio",        default="pio",
                     help="Path to pio binary (default: pio)")
     ap.add_argument("--from-gain",  type=int, default=13,
@@ -222,28 +289,27 @@ def main() -> None:
                     help="Ending gain step for pass 1 (default 1)")
     ap.add_argument("--passes",     type=int, default=3,
                     help="Number of passes, alternating direction (default 3)")
-    ap.add_argument("--cal",        type=int, default=13382,
+    ap.add_argument("--cal",        type=int, default=13296,
                     help="CAL_TABLE[2][4] in firmware (for logging only)")
     ap.add_argument("--save-samples", action="store_true", default=True,
                     help="Write every raw sample to <log>_samples.csv")
     args = ap.parse_args()
 
-    # Build pass list: pass 1 uses from→to, pass 2 reverses, pass 3 repeats from→to, etc.
     lo = min(args.from_gain, args.to_gain)
     hi = max(args.from_gain, args.to_gain)
-    start_high = args.from_gain >= args.to_gain  # True → pass 1 goes 13→1
+    start_high = args.from_gain >= args.to_gain
 
     all_gain_sequences: list[list[int]] = []
     for p in range(args.passes):
         from_high = start_high if p % 2 == 0 else not start_high
         if from_high:
-            seq = list(range(hi, lo - 1, -1))   # e.g. [13,12,...,1]
+            seq = list(range(hi, lo - 1, -1))
         else:
-            seq = list(range(lo, hi + 1))         # e.g. [1,2,...,13]
+            seq = list(range(lo, hi + 1))
         all_gain_sequences.append(seq)
 
     total_steps = sum(len(s) for s in all_gain_sequences)
-    est_hours   = total_steps * N_SAMPLES * 0.72 / 3600
+    est_hours   = total_steps * N_SAMPLES * 0.82 / 3600
 
     ts           = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path     = ASSETS_DIR / f"gain_sweep_{ts}.csv"
@@ -252,8 +318,15 @@ def main() -> None:
 
     fieldnames = ["pass_num", "gain_set", "gain_verified", "mean_m", "sigma_m",
                   "rssi_dbm", "n_raw", "n_rejected", "cal", "time_utc"]
-    sample_fieldnames = ["pass_num", "gain_set", "t_ms", "raw_m", "die_c", "amb_c",
-                         "rssi_dbm", "gain_step", "snr_db", "rssi_sync", "kept"]
+    sample_fieldnames = [
+        "pass_num", "gain_set", "t_ms", "raw_m", "die_c", "amb_c",
+        "rssi_dbm", "gain_step", "snr_db", "rssi_sync",
+        "inst_rssi_dbm", "freq_err_hz",
+        "lora_rssi_dbm", "lora_snr_db",
+        "chimp_inst_rssi_dbm", "chimp_rssi_sync_dbm", "chimp_snr_db",
+        "chimp_rssi_corr_dbm", "chimp_gain_step", "chimp_freq_err_hz",
+        "kept",
+    ]
 
     print("=" * 68)
     print("  SX1280 Multi-Pass Gain Sweep")
@@ -268,7 +341,6 @@ def main() -> None:
         print(f"  Slave:   {args.slave_port}  → {slave_path.name}")
     print("=" * 68)
 
-    # Start slave logger thread
     slave_stop   = threading.Event()
     slave_thread = None
     if args.slave_port:
@@ -320,12 +392,34 @@ def main() -> None:
                             "time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                         })
                         f.flush()
-                        print(f"  [warn] Signal lost at gain={gain} pass={pass_num}. Continuing to next step.")
+                        print(f"  [warn] Signal lost at gain={gain} pass={pass_num}. Continuing.")
                         continue
 
                     if sample_writer is not None and raw_rows:
                         for r in raw_rows:
-                            sample_writer.writerow({"pass_num": pass_num, "gain_set": gain, **r})
+                            sample_writer.writerow({
+                                "pass_num": pass_num,
+                                "gain_set": gain,
+                                "t_ms":                r['t_ms'],
+                                "raw_m":               f"{r['raw_m']:.4f}",
+                                "die_c":               f"{r['die_c']:.1f}",
+                                "amb_c":               f"{r['amb_c']:.2f}" if not math.isnan(r['amb_c']) else "NA",
+                                "rssi_dbm":            f"{r['rssi_dbm']:.1f}",
+                                "gain_step":           r['gain_step'],
+                                "snr_db":              f"{r['snr_db']:.1f}" if not math.isnan(r['snr_db']) else "",
+                                "rssi_sync":           f"{r['rssi_sync']:.1f}" if not math.isnan(r['rssi_sync']) else "",
+                                "inst_rssi_dbm":       f"{r['inst_rssi_dbm']:.1f}" if not math.isnan(r['inst_rssi_dbm']) else "",
+                                "freq_err_hz":         f"{r['freq_err_hz']:.0f}" if not math.isnan(r['freq_err_hz']) else "",
+                                "lora_rssi_dbm":       f"{r['lora_rssi_dbm']:.1f}" if not math.isnan(r['lora_rssi_dbm']) else "",
+                                "lora_snr_db":         f"{r['lora_snr_db']:.1f}" if not math.isnan(r['lora_snr_db']) else "",
+                                "chimp_inst_rssi_dbm": f"{r['chimp_inst_rssi_dbm']:.1f}" if not math.isnan(r['chimp_inst_rssi_dbm']) else "",
+                                "chimp_rssi_sync_dbm": f"{r['chimp_rssi_sync_dbm']:.1f}" if not math.isnan(r['chimp_rssi_sync_dbm']) else "",
+                                "chimp_snr_db":        f"{r['chimp_snr_db']:.1f}" if not math.isnan(r['chimp_snr_db']) else "",
+                                "chimp_rssi_corr_dbm": f"{r['chimp_rssi_corr_dbm']:.1f}" if not math.isnan(r['chimp_rssi_corr_dbm']) else "",
+                                "chimp_gain_step":     r['chimp_gain_step'],
+                                "chimp_freq_err_hz":   f"{r['chimp_freq_err_hz']:.0f}" if not math.isnan(r['chimp_freq_err_hz']) else "",
+                                "kept":                r['kept'],
+                            })
                         sample_f.flush()
 
                     row = {
@@ -360,10 +454,8 @@ def main() -> None:
     if slave_thread:
         slave_thread.join(timeout=3.0)
 
-    # Restore FIXED_GAIN=0 (AGC) after sweep
     set_fixed_gain(0)
 
-    # Final summary table grouped by gain, across all passes
     if all_results:
         print(f"\n{'═' * 68}")
         print(f"  Final Summary  CAL={args.cal}  passes={args.passes}")
