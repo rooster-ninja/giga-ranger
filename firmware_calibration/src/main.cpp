@@ -570,8 +570,8 @@ void loop() {
         rx_arm();
         if (rx_wait(200)) {
             PktTelem pl{};
-            if (radio.readData((uint8_t*)&pl, sizeof(pl)) == RADIOLIB_ERR_NONE
-                    && pl.type == PKT_TELEM) {
+            int rderr = radio.readData((uint8_t*)&pl, sizeof(pl));
+            if (rderr == RADIOLIB_ERR_NONE && pl.type == PKT_TELEM) {
                 g_lora_rssi = radio.getRSSI();
                 g_lora_snr  = radio.getSNR();
                 auto u2f = [](uint8_t r) -> float { return r ? -(float)r / 2.0f : 0.0f; };
@@ -583,7 +583,11 @@ void loop() {
                 g_chimp.freq_err   = (float)(int16_t)((pl.freq_hi << 8) | pl.freq_lo)
                                      * (1625000.0f / 65536.0f);
                 g_chimp.ok = true;
+            } else {
+                Serial.printf("# TELEM rx: err=%d type=0x%02X\n", rderr, (unsigned)pl.type);
             }
+        } else {
+            Serial.println("# TELEM rx: timeout");
         }
         apply_gain();
 
