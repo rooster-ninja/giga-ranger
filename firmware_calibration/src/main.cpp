@@ -699,7 +699,14 @@ void loop() {
         }
         c_miss = 0;
 
-        // Wait for Alpha to finish switch_to_lora() + apply_gain() (~10 ms total)
+        // Switch from RANGING packet type to LoRa before transmitting TELEM.
+        // startRanging() leaves the chip in RANGING mode; radio.transmit() after
+        // that sends a ranging-format frame that Alpha cannot decode as LoRa.
+        // Also aligns radio state for the LoRa RX (STOP check) that follows.
+        switch_to_lora();
+        apply_gain();
+
+        // Wait for Alpha to finish its own switch_to_lora() + apply_gain() + startReceive()
         delay(60);
 
         // Pack and send TELEM
