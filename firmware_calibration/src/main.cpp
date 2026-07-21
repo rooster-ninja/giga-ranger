@@ -565,10 +565,26 @@ void loop() {
         // startRanging() leaves radio in RANGING packet type — switch back to LoRa
         switch_to_lora();
         apply_gain();
+        {
+            // Read GetPacketType (0x03) directly — verify switch_to_lora() took effect
+            SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+            digitalWrite(RADIO_NSS, LOW);
+            SPI.transfer(0x03);
+            uint32_t _t = millis(); while (digitalRead(RADIO_BUSY) && millis()-_t < 5) {}
+            uint8_t _pt = SPI.transfer(0x00);
+            digitalWrite(RADIO_NSS, HIGH);
+            SPI.endTransaction();
+            Serial.printf("# pkt_type after switch: 0x%02X (want 0x01=LoRa)\n", _pt);
+        }
 
         // Handshake: signal Chimp we're ready to receive its TELEM, then listen.
         // Chimp waits in LoRa RX for this trigger, sends TELEM immediately after.
-        send_ctrl(PKT_TELEM_REQ, 0);
+        {
+            PktCtrl p = { PKT_TELEM_REQ, 0, (uint32_t)millis() };
+            int tx_ret = radio.transmit((uint8_t*)&p, sizeof(p));
+            if (tx_ret != RADIOLIB_ERR_NONE)
+                Serial.printf("# TELEM_REQ tx err=%d\n", tx_ret);
+        }
         apply_gain();
 
         g_chimp = {};
@@ -709,11 +725,27 @@ void loop() {
         // Switch from RANGING packet type to LoRa.
         switch_to_lora();
         apply_gain();
+        {
+            SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+            digitalWrite(RADIO_NSS, LOW);
+            SPI.transfer(0x03);
+            uint32_t _t = millis(); while (digitalRead(RADIO_BUSY) && millis()-_t < 5) {}
+            uint8_t _pt = SPI.transfer(0x00);
+            digitalWrite(RADIO_NSS, HIGH);
+            SPI.endTransaction();
+            Serial.printf("# pkt_type after switch: 0x%02X (want 0x01=LoRa)\n", _pt);
+        }
 
         // Handshake: wait for Alpha's PKT_TELEM_REQ before sending TELEM.
         // This eliminates the fixed-delay timing race — we only transmit when
         // Alpha has confirmed it is ready to receive.
-        rx_arm();
+        {
+            isr_fired = false;
+            radio.setDio1Action(onDio1);
+            int rx_ret = radio.startReceive();
+            if (rx_ret != RADIOLIB_ERR_NONE)
+                Serial.printf("# startReceive err=%d\n", rx_ret);
+        }
         if (rx_wait(500)) {
             uint8_t req[16] = {};
             if (radio.readData(req, 16) == RADIOLIB_ERR_NONE && req[0] == PKT_TELEM_REQ) {
