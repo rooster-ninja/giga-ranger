@@ -62,6 +62,7 @@ static const uint16_t CAL_TABLE[3][6] = {
 #define PKT_STOP         0x20
 #define PKT_STOP_ACK     0x21
 #define PKT_TELEM        0xAB
+#define PKT_TELEM_REQ    0xAC  // Alpha → Chimp: "I'm ready to receive your TELEM"
 
 // Control packets: { type, seq, t_ms[4] } = 6 bytes
 struct __attribute__((packed)) PktCtrl {
@@ -561,14 +562,18 @@ void loop() {
         }
         a_miss = 0;
 
-        // startRanging() leaves radio in RANGING packet type — switch back to LoRa for TELEM
+        // startRanging() leaves radio in RANGING packet type — switch back to LoRa
         switch_to_lora();
         apply_gain();
 
-        // Receive TELEM from Chimp
+        // Handshake: signal Chimp we're ready to receive its TELEM, then listen.
+        // Chimp waits in LoRa RX for this trigger, sends TELEM immediately after.
+        send_ctrl(PKT_TELEM_REQ, 0);
+        apply_gain();
+
         g_chimp = {};
         rx_arm();
-        if (rx_wait(200)) {
+        if (rx_wait(500)) {
             PktTelem pl{};
             int rderr = radio.readData((uint8_t*)&pl, sizeof(pl));
             if (rderr == RADIOLIB_ERR_NONE && pl.type == PKT_TELEM) {
@@ -613,8 +618,6 @@ void loop() {
             rx_arm();
         }
 
-        // Give Chimp time to re-enter ranging slave mode after its TELEM+apply_gain cycle
-        delay(60);
         break;
     }
 
@@ -703,29 +706,32 @@ void loop() {
         }
         c_miss = 0;
 
-        // Switch from RANGING packet type to LoRa before transmitting TELEM.
-        // startRanging() leaves the chip in RANGING mode; radio.transmit() after
-        // that sends a ranging-format frame that Alpha cannot decode as LoRa.
-        // Also aligns radio state for the LoRa RX (STOP check) that follows.
+        // Switch from RANGING packet type to LoRa.
         switch_to_lora();
         apply_gain();
 
-        // Wait for Alpha to finish its own switch_to_lora() + apply_gain() + startReceive()
-        delay(60);
-
-        // Pack and send TELEM
-        {
-            int16_t fe16 = (int16_t)(g_freq_err_hz * 65536.0f / 1625000.0f);
-            PktTelem pl{};
-            pl.type          = PKT_TELEM;
-            pl.inst_rssi_raw = (g_inst_rssi  < 0.f) ? (uint8_t)(-g_inst_rssi  * 2.f) : 0;
-            pl.rssi_sync_raw = (g_rssi_sync  < 0.f) ? (uint8_t)(-g_rssi_sync  * 2.f) : 0;
-            pl.snr_raw       = (int8_t)(g_snr * 4.f);
-            pl.rssi_corr_raw = (g_rssi       < 0.f) ? (uint8_t)(-g_rssi       * 2.f) : 0;
-            pl.gain_step     = g_gain_step;
-            pl.freq_hi       = (uint8_t)(((uint16_t)fe16 >> 8) & 0xFF);
-            pl.freq_lo       = (uint8_t)((uint16_t)fe16 & 0xFF);
-            radio.transmit((uint8_t*)&pl, sizeof(pl));
+        // Handshake: wait for Alpha's PKT_TELEM_REQ before sending TELEM.
+        // This eliminates the fixed-delay timing race — we only transmit when
+        // Alpha has confirmed it is ready to receive.
+        rx_arm();
+        if (rx_wait(500)) {
+            uint8_t req[16] = {};
+            if (radio.readData(req, 16) == RADIOLIB_ERR_NONE && req[0] == PKT_TELEM_REQ) {
+                // Alpha is now entering RX — give it a moment to arm
+                apply_gain();
+                delay(30);
+                int16_t fe16 = (int16_t)(g_freq_err_hz * 65536.0f / 1625000.0f);
+                PktTelem pl{};
+                pl.type          = PKT_TELEM;
+                pl.inst_rssi_raw = (g_inst_rssi  < 0.f) ? (uint8_t)(-g_inst_rssi  * 2.f) : 0;
+                pl.rssi_sync_raw = (g_rssi_sync  < 0.f) ? (uint8_t)(-g_rssi_sync  * 2.f) : 0;
+                pl.snr_raw       = (int8_t)(g_snr * 4.f);
+                pl.rssi_corr_raw = (g_rssi       < 0.f) ? (uint8_t)(-g_rssi       * 2.f) : 0;
+                pl.gain_step     = g_gain_step;
+                pl.freq_hi       = (uint8_t)(((uint16_t)fe16 >> 8) & 0xFF);
+                pl.freq_lo       = (uint8_t)((uint16_t)fe16 & 0xFF);
+                radio.transmit((uint8_t*)&pl, sizeof(pl));
+            }
         }
         apply_gain();
 
