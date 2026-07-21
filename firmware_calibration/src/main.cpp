@@ -260,6 +260,9 @@ static void setup_gain() {
 // Ranging exchange with timeout. Returns distance (m) or NAN on failure.
 // Updates g_rssi_sync, g_snr, g_inst_rssi, g_rssi, g_gain_step, g_freq_err_hz.
 static float do_ranging(bool master) {
+    // Radio may be in LoRa RX (after rx_wait STOP check) — standby first so
+    // startRanging's SetPacketType(RANGING) is accepted cleanly.
+    radio.standby();
     isr_fired = false;
     radio.setDio1Action(onDio1);
     int state = radio.startRanging(master, RANGING_ADDR, CAL_TABLE);
