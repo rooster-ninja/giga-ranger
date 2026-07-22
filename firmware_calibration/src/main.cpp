@@ -135,45 +135,6 @@ static void spi_write_raw(uint16_t addr, uint8_t val) {
 // startRanging() leaves the chip in RANGING packet type; startReceive() after that
 // will try to receive a ranging frame, not a LoRa frame.  Call this before rx_arm()
 // when transitioning from ranging back to LoRa RX.
-static void switch_to_lora() {
-    radio.standby();
-    uint32_t t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 10) {}
-
-    SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
-
-    // SetPacketType = LoRa (0x01)
-    digitalWrite(RADIO_NSS, LOW);
-    SPI.transfer(0x8A);
-    t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 5) {}
-    SPI.transfer(0x01);
-    digitalWrite(RADIO_NSS, HIGH);
-    delayMicroseconds(100);
-    t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 5) {}
-
-    // SetModulationParams: SF9 (0x90), BW1625 (0x0A), CR4/5 (0x01)
-    digitalWrite(RADIO_NSS, LOW);
-    SPI.transfer(0x8B);
-    t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 5) {}
-    SPI.transfer(0x90); SPI.transfer(0x0A); SPI.transfer(0x01);
-    digitalWrite(RADIO_NSS, HIGH);
-    delayMicroseconds(100);
-    t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 5) {}
-
-    // SetPacketParams: preamble=12, explicit header, payload=255, CRC on, IQ normal
-    digitalWrite(RADIO_NSS, LOW);
-    SPI.transfer(0x8C);
-    t = millis(); while (digitalRead(RADIO_BUSY) && millis()-t < 5) {}
-    SPI.transfer(0x00); SPI.transfer(0x0C);  // preamble 12 symbols
-    SPI.transfer(0x00);                       // explicit header
-    SPI.transfer(0xFF);                       // max payload
-    SPI.transfer(0x20);                       // CRC on
-    SPI.transfer(0x40);                       // IQ standard
-    SPI.transfer(0x00);
-    digitalWrite(RADIO_NSS, HIGH);
-
-    SPI.endTransaction();
-    delayMicroseconds(100);
-}
 
 // GetPacketStatus (0x1D): updates g_rssi_sync and g_snr.
 // Dead on master in ranging mode (returns 0/0); alive on slave.
@@ -562,21 +523,15 @@ void loop() {
         }
         a_miss = 0;
 
-        // Full radio reset to LoRa (test: does radio.begin() fix what switch_to_lora() can't?)
-        {
-            unsigned long t0 = millis();
-            radio.begin(CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, 5, 0x12, CAL_TX_DBM);
-            apply_gain();
-            Serial.printf("# radio.begin() took %lums\n", millis()-t0);
-        }
+        // radio.begin() resets to LoRa mode in ~4ms on T3-S3 without hardware reset.
+        radio.begin(CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, 5, 0x12, CAL_TX_DBM);
+        apply_gain();
 
         // Handshake: signal Chimp we're ready to receive its TELEM, then listen.
         // Chimp waits in LoRa RX for this trigger, sends TELEM immediately after.
         {
             PktCtrl p = { PKT_TELEM_REQ, 0, (uint32_t)millis() };
-            int tx_ret = radio.transmit((uint8_t*)&p, sizeof(p));
-            if (tx_ret != RADIOLIB_ERR_NONE)
-                Serial.printf("# TELEM_REQ tx err=%d\n", tx_ret);
+            radio.transmit((uint8_t*)&p, sizeof(p));
         }
         apply_gain();
 
@@ -715,20 +670,14 @@ void loop() {
         }
         c_miss = 0;
 
-        // Full radio reset to LoRa (test: does radio.begin() fix what switch_to_lora() can't?)
+        // radio.begin() resets to LoRa mode in ~4ms on T3-S3 without hardware reset.
         radio.begin(CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, 5, 0x12, CAL_TX_DBM);
         apply_gain();
 
         // Handshake: wait for Alpha's PKT_TELEM_REQ before sending TELEM.
         // This eliminates the fixed-delay timing race — we only transmit when
         // Alpha has confirmed it is ready to receive.
-        {
-            isr_fired = false;
-            radio.setDio1Action(onDio1);
-            int rx_ret = radio.startReceive();
-            if (rx_ret != RADIOLIB_ERR_NONE)
-                Serial.printf("# startReceive err=%d\n", rx_ret);
-        }
+        rx_arm();
         if (rx_wait(500)) {
             uint8_t req[16] = {};
             if (radio.readData(req, 16) == RADIOLIB_ERR_NONE && req[0] == PKT_TELEM_REQ) {
