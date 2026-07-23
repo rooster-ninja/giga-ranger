@@ -195,8 +195,8 @@ def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
     time.sleep(1.5)
     ser.close()
 
-    if len(samples) < N_SAMPLES // 2:
-        print(f"  [warn] Only {len(samples)} samples — signal likely lost at this gain step")
+    if len(samples) < 2:
+        print(f"  [warn] No samples received at this gain step")
         return None, None
 
     raw_m_vals = [s['raw_m'] for s in samples]
@@ -208,10 +208,6 @@ def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
     kept_mask = [lo <= r <= hi for r in raw_m_vals]
     clean = [s for s, k in zip(samples, kept_mask) if k]
     n_rej = n_raw - len(clean)
-
-    if len(clean) < 10:
-        print(f"  [warn] Too few clean samples after filter: {len(clean)}/{n_raw}")
-        return None, None
 
     clean_m    = [s['raw_m']    for s in clean]
     clean_rssi = [s['rssi_dbm'] for s in clean]
