@@ -44,7 +44,7 @@ ASSETS_DIR = SCRIPT_DIR.parent / "Assets"
 TARGET_M   = 1.0 / 0.695  # RG-316 1 m cable, VF 0.695 → apparent ToF distance = 1.4388 m
 N_SAMPLES  = 50
 DATA_TIMEOUT_S = 120  # 50 samples × ~1 s/exchange + margin
-LINK_TIMEOUT_S = 30   # time to wait for LoRa link establishment
+LINK_TIMEOUT_S = 90   # time to wait for LoRa link establishment
 
 # Matches the first 6 mandatory master CSV fields:
 # t_ms,raw_m,die_c,amb_c,rssi_dbm,gain_step
@@ -121,14 +121,12 @@ def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
     ranging exchanges, send "stop". Returns (summary_dict, raw_samples) or (None, None).
     """
     print(f"[serial] Connecting {port}…")
-    ser = serial.Serial(port, 115200, timeout=3.0)
-    time.sleep(2.0)   # wait for board reset after USB CDC connect
-    ser.reset_input_buffer()
+    ser = serial.Serial(port, 115200, timeout=1.0)
 
-    # Ensure we're not mid-ranging from a previous run
+    # Send stop in case we're somehow mid-ranging from a previous run.
+    # Do NOT flush the buffer here — LINK ESTABLISHED or heartbeat lines
+    # may already be in the buffer if the link came up before port open.
     ser.write(b"stop\n")
-    time.sleep(0.5)
-    ser.reset_input_buffer()
 
     # Wait for LoRa link establishment
     print(f"[serial] Waiting for LoRa link (≤{LINK_TIMEOUT_S}s)…")
