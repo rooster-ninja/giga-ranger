@@ -42,8 +42,8 @@ FW_SRC     = FW_DIR / "src" / "main.cpp"
 ASSETS_DIR = SCRIPT_DIR.parent / "Assets"
 
 TARGET_M   = 1.0 / 0.695  # RG-316 1 m cable, VF 0.695 → apparent ToF distance = 1.4388 m
-N_SAMPLES  = 500
-DATA_TIMEOUT_S = 450  # 500 samples × ~0.82 s + margin
+N_SAMPLES  = 50
+DATA_TIMEOUT_S = 120  # 50 samples × ~1 s/exchange + margin
 LINK_TIMEOUT_S = 30   # time to wait for LoRa link establishment
 
 # Matches the first 6 mandatory master CSV fields:
@@ -187,7 +187,7 @@ def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
         if row:
             samples.append(row)
             n = len(samples)
-            if n % 100 == 0:
+            if n % 10 == 0:
                 print(f"  [{n}/{N_SAMPLES}] rssi={row['rssi_dbm']:.1f} gain={row['gain_step']}")
 
     # Send stop
@@ -195,7 +195,7 @@ def collect_batch(port: str) -> tuple[dict, list[dict]] | tuple[None, None]:
     time.sleep(1.5)
     ser.close()
 
-    if len(samples) < 50:
+    if len(samples) < N_SAMPLES // 2:
         print(f"  [warn] Only {len(samples)} samples — signal likely lost at this gain step")
         return None, None
 
@@ -279,8 +279,8 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port",       default="/dev/ttyACM2",
                     help="Serial port for Alpha (master) board (default: /dev/ttyACM2)")
-    ap.add_argument("--slave-port", default="/dev/ttyACM1",
-                    help="Serial port for Chimp (slave) board (default: /dev/ttyACM1)")
+    ap.add_argument("--slave-port", default="/dev/ttyACM0",
+                    help="Serial port for Chimp (slave) board (default: /dev/ttyACM0)")
     ap.add_argument("--pio",        default="pio",
                     help="Path to pio binary (default: pio)")
     ap.add_argument("--from-gain",  type=int, default=13,
@@ -289,7 +289,7 @@ def main() -> None:
                     help="Ending gain step for pass 1 (default 1)")
     ap.add_argument("--passes",     type=int, default=3,
                     help="Number of passes, alternating direction (default 3)")
-    ap.add_argument("--cal",        type=int, default=13296,
+    ap.add_argument("--cal",        type=int, default=13426,
                     help="CAL_TABLE[2][4] in firmware (for logging only)")
     ap.add_argument("--save-samples", action="store_true", default=True,
                     help="Write every raw sample to <log>_samples.csv")
@@ -309,7 +309,7 @@ def main() -> None:
         all_gain_sequences.append(seq)
 
     total_steps = sum(len(s) for s in all_gain_sequences)
-    est_hours   = total_steps * N_SAMPLES * 0.82 / 3600
+    est_hours   = total_steps * N_SAMPLES * 1.0 / 3600
 
     ts           = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path     = ASSETS_DIR / f"gain_sweep_{ts}.csv"
