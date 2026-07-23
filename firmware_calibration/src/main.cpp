@@ -44,8 +44,11 @@
 #define FIXED_GAIN  10
 
 // ── Calibration table ─────────────────────────────────────────────────────────
-// SF9/BW1625 = CAL_TABLE[2][4] = 13296
-// Alpha master + new Chimp slave — calibrated 2026-07-20, gain=10, 40dB bench
+// SF9/BW1625 = CAL_TABLE[2][4]
+// *** NEEDS RE-CALIBRATION ***
+// Previous auto_cal runs targeted 0.695 m (wrong: used physical × VF instead of physical / VF).
+// Correct target = 1.0 / 0.695 = 1.4388 m.  Re-run auto_cal.py to derive correct values.
+// Alpha master + new Chimp slave — calibrated 2026-07-20, gain=10, 40dB bench (WRONG TARGET)
 static const uint16_t CAL_TABLE[3][6] = {
     { 10299, 10271, 10244, 10242, 10230, 10246 },
     { 11486, 11474, 11453, 11426, 11417, 11401 },

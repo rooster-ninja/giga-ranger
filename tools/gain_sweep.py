@@ -41,7 +41,7 @@ FW_DIR     = SCRIPT_DIR.parent / "firmware_calibration"
 FW_SRC     = FW_DIR / "src" / "main.cpp"
 ASSETS_DIR = SCRIPT_DIR.parent / "Assets"
 
-TARGET_M   = 0.695
+TARGET_M   = 1.0 / 0.695  # RG-316 1 m cable, VF 0.695 → apparent ToF distance = 1.4388 m
 N_SAMPLES  = 500
 DATA_TIMEOUT_S = 450  # 500 samples × ~0.82 s + margin
 LINK_TIMEOUT_S = 30   # time to wait for LoRa link establishment
