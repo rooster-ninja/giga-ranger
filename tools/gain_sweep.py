@@ -285,6 +285,8 @@ def main() -> None:
                     help="Number of passes, alternating direction (default 3)")
     ap.add_argument("--cal",        type=int, default=13426,
                     help="CAL_TABLE[2][4] in firmware (for logging only)")
+    ap.add_argument("--slave-gain", type=int, default=10,
+                    help="FIXED_GAIN to flash Chimp with (default 10, matches calibration)")
     ap.add_argument("--save-samples", action="store_true", default=True,
                     help="Write every raw sample to <log>_samples.csv")
     args = ap.parse_args()
@@ -335,9 +337,10 @@ def main() -> None:
         print(f"  Slave:   {args.slave_port}  → {slave_path.name}")
     print("=" * 68)
 
-    # Flash Chimp (slave) once at startup for a clean known state
+    # Flash Chimp (slave) once at startup with calibration gain for a clean known state
     if args.slave_port:
-        print(f"\n[init] Flashing Chimp (slave) on {args.slave_port}…")
+        print(f"\n[init] Flashing Chimp (slave) on {args.slave_port} with FIXED_GAIN={args.slave_gain}…")
+        set_fixed_gain(args.slave_gain)
         flash(args.slave_port, args.pio, "slave")
         print("[init] Chimp flashed — waiting 5 s for boot + SEEK…")
         time.sleep(5.0)
@@ -455,7 +458,7 @@ def main() -> None:
     if slave_thread:
         slave_thread.join(timeout=3.0)
 
-    set_fixed_gain(0)
+    set_fixed_gain(args.slave_gain)  # restore source to calibration gain (not AGC)
 
     if all_results:
         print(f"\n{'═' * 68}")
