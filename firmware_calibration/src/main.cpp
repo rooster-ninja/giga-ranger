@@ -44,15 +44,14 @@
 #define FIXED_GAIN  10
 
 // ── Calibration table ─────────────────────────────────────────────────────────
-// SF9/BW1625 = CAL_TABLE[2][4]
-// *** NEEDS RE-CALIBRATION ***
-// Previous auto_cal runs targeted 0.695 m (wrong: used physical × VF instead of physical / VF).
-// Correct target = 1.0 / 0.695 = 1.4388 m.  Re-run auto_cal.py to derive correct values.
-// Alpha master + new Chimp slave — calibrated 2026-07-20, gain=10, 40dB bench (WRONG TARGET)
+// SF9/BW1625 = CAL_TABLE[2][4] = 13426
+// Alpha master + Chimp slave — 2026-07-23, gain=10, 80 dB bench
+// target=1.4388 m (1 m RG-316, VF=0.695 → 1/0.695), mean=1.4547 m, sigma=0.4444 m
+// High sigma is expected at 80 dB (SNR-dependent bias); mean is within ±30 mm tolerance.
 static const uint16_t CAL_TABLE[3][6] = {
     { 10299, 10271, 10244, 10242, 10230, 10246 },
     { 11486, 11474, 11453, 11426, 11417, 11401 },
-    { 13308, 13493, 13528, 13515, 13296, 13376 },
+    { 13308, 13493, 13528, 13515, 13426, 13376 },
 };
 
 // ── Packet type bytes ─────────────────────────────────────────────────────────
