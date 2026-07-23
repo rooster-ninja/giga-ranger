@@ -106,8 +106,8 @@ def set_fixed_gain(gain: int) -> None:
     print(f"[fw]  FIXED_GAIN = {gain}")
 
 
-def flash(port: str, pio: str) -> None:
-    cmd = [os.path.expanduser(pio), "run", "-e", "master", "-t", "upload",
+def flash(port: str, pio: str, env: str = "master") -> None:
+    cmd = [os.path.expanduser(pio), "run", "-e", env, "-t", "upload",
            f"--upload-port={port}"]
     print(f"[flash] {' '.join(cmd)}")
     r = subprocess.run(cmd, cwd=FW_DIR, capture_output=False)
@@ -334,6 +334,13 @@ def main() -> None:
     if args.slave_port:
         print(f"  Slave:   {args.slave_port}  → {slave_path.name}")
     print("=" * 68)
+
+    # Flash Chimp (slave) once at startup for a clean known state
+    if args.slave_port:
+        print(f"\n[init] Flashing Chimp (slave) on {args.slave_port}…")
+        flash(args.slave_port, args.pio, "slave")
+        print("[init] Chimp flashed — waiting 5 s for boot + SEEK…")
+        time.sleep(5.0)
 
     slave_stop   = threading.Event()
     slave_thread = None

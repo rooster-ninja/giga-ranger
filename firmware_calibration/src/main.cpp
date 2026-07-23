@@ -13,6 +13,9 @@
 #include <Wire.h>
 #include <RadioLib.h>
 #include <Adafruit_BME280.h>
+#include "esp_task_wdt.h"
+
+#define WDT_TIMEOUT_S 8   // reboot if loop() stalls > 8 s (longest normal path ~1 s)
 
 // ── Pin assignments ───────────────────────────────────────────────────────────
 #define RADIO_NSS    7
@@ -424,6 +427,10 @@ void setup() {
     radio.setDio1Action(onDio1);
     setup_gain();
 
+    esp_task_wdt_init(WDT_TIMEOUT_S, true);
+    esp_task_wdt_add(NULL);
+    Serial.printf("# WDT: %d s\n", WDT_TIMEOUT_S);
+
 #ifdef CAL_MASTER
     Serial.println("# Role: ALPHA (master)");
     Serial.println("# Listening for Chimp CONNECT_REQ…");
@@ -440,6 +447,7 @@ void setup() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void loop() {
+    esp_task_wdt_reset();
 #ifdef CAL_MASTER
     // ── ALPHA STATE MACHINE ───────────────────────────────────────────────────
 
