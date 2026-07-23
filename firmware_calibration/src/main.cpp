@@ -33,7 +33,7 @@
 #define RANGING_ADDR      0xDEADBEEF
 #define CABLE_PHYS_M      1.0f
 #define CABLE_VF          0.695f
-#define CABLE_ELEC_M      (CABLE_PHYS_M * CABLE_VF)
+#define CABLE_ELEC_M      (CABLE_PHYS_M / CABLE_VF)   // apparent ToF length = 1.4388 m
 #define METERS_PER_COUNT  0.1803f
 
 // ── Run parameters ────────────────────────────────────────────────────────────
