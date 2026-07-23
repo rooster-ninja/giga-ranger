@@ -3,7 +3,7 @@
 auto_cal.py — Automated SX1280 ranging calibration (Alpha as master).
 
 Iterates CAL_TABLE[2][4] in firmware_calibration/src/main.cpp until
-mean ranging result ≈ 0.695 m (RG-316 1 m cable, VF 0.695).
+mean ranging result ≈ 1.4388 m (RG-316 1 m cable, VF 0.695 → apparent = 1 m / 0.695).
 
 Firmware must be free-run master (no SPACE trigger). Waits for the
 first # [n=100] stats line after each flash (~70 s per iteration).
@@ -28,7 +28,7 @@ except ImportError:
     print("[FATAL] pyserial not installed: pip install pyserial")
     sys.exit(1)
 
-TARGET_M    = 0.695   # RG-316 1m × VF 0.695
+TARGET_M    = 1.0 / 0.695  # RG-316 1 m cable, VF 0.695 → apparent ToF distance = 1.4388 m
 TOLERANCE_M = 0.03    # converge when |mean − target| < 30 mm
 MAX_ITERS   = 15
 
@@ -189,9 +189,9 @@ def interpolate(data: list[tuple[int, float]], target: float) -> int | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--master-port", default="/dev/ttyACM1",
-                    help="Serial port for Alpha (master)")
-    ap.add_argument("--pio", default="pio",
+    ap.add_argument("--master-port", required=True,
+                    help="Serial port for Alpha (master), e.g. /dev/ttyACM2")
+    ap.add_argument("--pio", required=True,
                     help="Path to pio executable, e.g. ~/.local/bin/pio")
     ap.add_argument("--start-cal", type=int, default=13316,
                     help="Starting CAL_TABLE[2][4] value (13316 = Alpha convergence at die~36°C/amb~25.5°C, 2026-07-17)")
