@@ -1,4 +1,6 @@
 .DS_Store
+**/__pycache__/
+**/.ipynb_checkpoints/
 firmware_calibration/.pio/
 firmware_calibration/.vscode/
 firmware_ranging/.pio/
