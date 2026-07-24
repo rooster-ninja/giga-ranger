@@ -98,79 +98,82 @@ def run_sample(port: str, n_samples: int) -> tuple[float, float, float]:
     Establish RANGING_INFO session on Alpha, collect n_samples CSV rows,
     return (filtered_mean_m, filtered_sigma_m, mean_rssi_dbm).
 
+    Handles mid-session LINK LOST by waiting for re-link and re-sending start.
     CSV columns: t_ms(0), raw_m(1), die_c(2), amb_c(3), rssi_dbm(4), ...
     """
+    LINK_TIMEOUT  = 90.0   # seconds to wait for (re-)link
+    SAMPLE_TIMEOUT = 90.0  # seconds with no new sample before giving up
+
     print(f"[serial] Opening {port} at 115200")
     ser = serial.Serial(port, 115200, timeout=1.0)
     ser.reset_input_buffer()
 
-    # Wait for LINK ESTABLISHED (~5 s board boot + <1 s Chimp re-link)
-    print("[serial] Waiting for LINK ESTABLISHED (up to 90 s)...")
-    deadline = time.time() + 90.0
-    linked = False
-    while time.time() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        line = raw.decode("ascii", errors="replace").strip()
-        print(f"  {line}")
-        if "LINK ESTABLISHED" in line:
-            linked = True
-            break
-
-    if not linked:
-        ser.close()
-        raise RuntimeError("Timeout waiting for LINK ESTABLISHED — is Chimp powered and flashed?")
-
-    # Drain heartbeat lines, then trigger ranging
-    time.sleep(1.5)
-    ser.reset_input_buffer()
-    ser.write(b"start\n")
-    print("[serial] Sent 'start'")
-
-    # Confirm RANGING_INFO entry (Alpha echoes "# MODE: RANGING_INFO" + CSV header)
-    deadline = time.time() + 15.0
-    ranging_active = False
-    while time.time() < deadline:
-        raw = ser.readline()
-        if not raw:
-            continue
-        line = raw.decode("ascii", errors="replace").strip()
-        print(f"  {line}")
-        if "MODE: RANGING_INFO" in line:
-            ranging_active = True
-        if ranging_active and line.startswith("t_ms,"):
-            break
-
-    if not ranging_active:
-        ser.close()
-        raise RuntimeError("Timeout waiting for RANGING_INFO — did start command get through?")
-
-    # Collect CSV data rows: (raw_m, rssi_dbm)
     samples: list[tuple[float, float]] = []
-    deadline = time.time() + n_samples * 3.0 + 30.0
-    print(f"[serial] Collecting {n_samples} samples...")
+    need_link     = True
+    ranging_active = False
+    link_deadline  = time.time() + LINK_TIMEOUT
+    last_sample_t  = time.time()
 
-    while len(samples) < n_samples and time.time() < deadline:
+    print(f"[serial] Waiting for LINK ESTABLISHED (up to {LINK_TIMEOUT:.0f} s)…")
+    print(f"[serial] Collecting {n_samples} samples…")
+
+    def trigger_start() -> None:
+        nonlocal ranging_active
+        time.sleep(1.5)
+        ser.reset_input_buffer()
+        ser.write(b"start\n")
+        print("[serial] Sent 'start'")
+        ranging_active = False
+
+    while len(samples) < n_samples:
+        now = time.time()
+        if need_link and now > link_deadline:
+            ser.close()
+            raise RuntimeError(
+                f"Timeout waiting for LINK ESTABLISHED (have {len(samples)}/{n_samples} samples) "
+                "— is Chimp powered and flashed?")
+        if not need_link and now - last_sample_t > SAMPLE_TIMEOUT:
+            ser.close()
+            raise RuntimeError(
+                f"No samples for {SAMPLE_TIMEOUT:.0f} s (have {len(samples)}/{n_samples})")
+
         raw = ser.readline()
         if not raw:
             continue
         line = raw.decode("ascii", errors="replace").strip()
         print(f"  {line}")
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(",")
-        if len(parts) < 5:
-            continue
-        try:
-            int(parts[0])  # must be numeric t_ms — skips CSV header row
-            raw_m = float(parts[1])
-            rssi  = float(parts[4]) if parts[4] else float("nan")
-            samples.append((raw_m, rssi))
-        except (ValueError, IndexError):
-            continue
-        if len(samples) % 50 == 0 and len(samples) > 0:
-            print(f"  [progress] {len(samples)}/{n_samples}")
+
+        if "LINK ESTABLISHED" in line:
+            need_link = False
+            trigger_start()
+            last_sample_t = time.time()
+
+        elif "LINK LOST" in line:
+            need_link     = True
+            ranging_active = False
+            link_deadline  = time.time() + LINK_TIMEOUT
+            last_sample_t  = time.time()
+            print(f"  [warn] Link lost — waiting for re-link ({len(samples)}/{n_samples} collected)…")
+
+        elif not need_link and "MODE: RANGING_INFO" in line:
+            ranging_active = True
+
+        elif ranging_active:
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(",")
+            if len(parts) < 5:
+                continue
+            try:
+                int(parts[0])  # must be numeric t_ms — rejects CSV header
+                raw_m = float(parts[1])
+                rssi  = float(parts[4]) if parts[4] else float("nan")
+                samples.append((raw_m, rssi))
+                last_sample_t = time.time()
+            except (ValueError, IndexError):
+                continue
+            if len(samples) % 50 == 0:
+                print(f"  [progress] {len(samples)}/{n_samples}")
 
     # Stop ranging
     ser.write(b"stop\n")
