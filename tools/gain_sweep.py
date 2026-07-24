@@ -283,7 +283,7 @@ def main() -> None:
                     help="Ending gain step for pass 1 (default 1)")
     ap.add_argument("--passes",     type=int, default=3,
                     help="Number of passes, alternating direction (default 3)")
-    ap.add_argument("--cal",        type=int, default=13426,
+    ap.add_argument("--cal",        type=int, default=13432,
                     help="CAL_TABLE[2][4] in firmware (for logging only)")
     ap.add_argument("--slave-gain", type=int, default=10,
                     help="FIXED_GAIN to flash Chimp with (default 10, matches calibration)")

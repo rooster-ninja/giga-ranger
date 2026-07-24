@@ -47,14 +47,14 @@
 #define FIXED_GAIN  10
 
 // ── Calibration table ─────────────────────────────────────────────────────────
-// SF9/BW1625 = CAL_TABLE[2][4] = 13426
-// Alpha master + Chimp slave — 2026-07-23, gain=10, 80 dB bench
-// target=1.4388 m (1 m RG-316, VF=0.695 → 1/0.695), mean=1.4547 m, sigma=0.4444 m
-// High sigma is expected at 80 dB (SNR-dependent bias); mean is within ±30 mm tolerance.
+// SF9/BW1625 = CAL_TABLE[2][4] = 13432
+// Alpha master + Chimp slave — 2026-07-24, FIXED_GAIN=10 both boards, 80 dB bench
+// target=1.4388 m (1 m RG-316, VF=0.695 → 1/0.695), mean=1.4668 m, sigma=0.5001 m
+// Recalibrated after fixing FIXED_GAIN consistency (previous 13426 used AGC on both boards).
 static const uint16_t CAL_TABLE[3][6] = {
     { 10299, 10271, 10244, 10242, 10230, 10246 },
     { 11486, 11474, 11453, 11426, 11417, 11401 },
-    { 13308, 13493, 13528, 13515, 13426, 13376 },
+    { 13308, 13493, 13528, 13515, 13432, 13376 },
 };
 
 // ── Packet type bytes ─────────────────────────────────────────────────────────
