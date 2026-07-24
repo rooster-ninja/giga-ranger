@@ -108,11 +108,14 @@ def run_sample(port: str, n_samples: int) -> tuple[float, float, float]:
     ser = serial.Serial(port, 115200, timeout=1.0)
     ser.reset_input_buffer()
 
+    MAX_DROPS = 5  # abort if link drops this many times in one run
+
     samples: list[tuple[float, float]] = []
-    need_link     = True
+    need_link      = True
     ranging_active = False
     link_deadline  = time.time() + LINK_TIMEOUT
     last_sample_t  = time.time()
+    drop_count     = 0
 
     print(f"[serial] Waiting for LINK ESTABLISHED (up to {LINK_TIMEOUT:.0f} s)…")
     print(f"[serial] Collecting {n_samples} samples…")
@@ -130,12 +133,11 @@ def run_sample(port: str, n_samples: int) -> tuple[float, float, float]:
         if need_link and now > link_deadline:
             ser.close()
             raise RuntimeError(
-                f"Timeout waiting for LINK ESTABLISHED (have {len(samples)}/{n_samples} samples) "
-                "— is Chimp powered and flashed?")
+                f"Timeout waiting for LINK ESTABLISHED — is Chimp powered and flashed?")
         if not need_link and now - last_sample_t > SAMPLE_TIMEOUT:
             ser.close()
             raise RuntimeError(
-                f"No samples for {SAMPLE_TIMEOUT:.0f} s (have {len(samples)}/{n_samples})")
+                f"No samples for {SAMPLE_TIMEOUT:.0f} s")
 
         raw = ser.readline()
         if not raw:
@@ -149,11 +151,17 @@ def run_sample(port: str, n_samples: int) -> tuple[float, float, float]:
             last_sample_t = time.time()
 
         elif "LINK LOST" in line:
-            need_link     = True
+            drop_count += 1
+            if drop_count >= MAX_DROPS:
+                ser.close()
+                raise RuntimeError(f"Link dropped {drop_count} times — aborting iteration")
+            # Discard samples: mixing sessions with different bias makes mean unreliable
+            samples = []
+            need_link      = True
             ranging_active = False
             link_deadline  = time.time() + LINK_TIMEOUT
             last_sample_t  = time.time()
-            print(f"  [warn] Link lost — waiting for re-link ({len(samples)}/{n_samples} collected)…")
+            print(f"  [warn] Link lost (drop #{drop_count}) — discarding samples, waiting for re-link…")
 
         elif not need_link and "MODE: RANGING_INFO" in line:
             ranging_active = True
