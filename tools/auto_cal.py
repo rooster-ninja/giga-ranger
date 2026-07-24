@@ -53,6 +53,18 @@ CAL_MIN = 10000
 CAL_MAX = 16000
 
 
+def set_fixed_gain(gain: int) -> None:
+    src = FW_SRC.read_text()
+    if not re.search(r'#define\s+FIXED_GAIN\s+\d+', src):
+        raise RuntimeError(f"FIXED_GAIN define not found in {FW_SRC}")
+    new_src = re.sub(r'(#define\s+FIXED_GAIN\s+)\d+', rf'\g<1>{gain}', src)
+    if new_src == src:
+        print(f"[fw]  FIXED_GAIN already {gain} — skipping write")
+        return
+    FW_SRC.write_text(new_src)
+    print(f"[fw]  FIXED_GAIN = {gain}")
+
+
 def set_cal(val: int) -> None:
     if not (CAL_MIN <= val <= CAL_MAX):
         raise ValueError(f"cal {val} out of range [{CAL_MIN}, {CAL_MAX}]")
@@ -226,19 +238,24 @@ def main() -> None:
                     help="Starting CAL_TABLE[2][4] (default: 13316)")
     ap.add_argument("--samples", type=int, default=200,
                     help="Samples per iteration (default: 200 ≈ 200 s at ~1 s/exchange)")
+    ap.add_argument("--slave-gain", type=int, default=10,
+                    help="FIXED_GAIN to flash Chimp with (default 10); master always uses same value")
     args = ap.parse_args()
 
     print("=" * 62)
     print("  SX1280 Auto-Calibration — Alpha master / Chimp slave")
-    print(f"  Target:  {TARGET_M:.4f} m  ±{TOLERANCE_M} m")
-    print(f"  Master:  {args.master_port}")
-    print(f"  Slave:   {args.slave_port}")
-    print(f"  PIO:     {args.pio}")
-    print(f"  Samples: {args.samples} per iteration")
+    print(f"  Target:     {TARGET_M:.4f} m  ±{TOLERANCE_M} m")
+    print(f"  Master:     {args.master_port}")
+    print(f"  Slave:      {args.slave_port}")
+    print(f"  PIO:        {args.pio}")
+    print(f"  Samples:    {args.samples} per iteration")
+    print(f"  Slave gain: FIXED_GAIN={args.slave_gain}")
     print("=" * 62)
 
-    # Flash Chimp (slave) once — firmware does not change between iterations
-    print("\n[init] Flashing Chimp (slave)...")
+    # Flash Chimp (slave) once — firmware does not change between iterations.
+    # Explicitly set FIXED_GAIN so calibration is consistent with gain_sweep runs.
+    print(f"\n[init] Flashing Chimp (slave) with FIXED_GAIN={args.slave_gain}…")
+    set_fixed_gain(args.slave_gain)
     flash(args.slave_port, args.pio, "slave")
     print("[init] Chimp flashed — waiting 5 s for boot + SEEK...")
     time.sleep(5.0)

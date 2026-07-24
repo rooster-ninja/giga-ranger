@@ -389,13 +389,15 @@ static ChimpState c_state    = C_SEEKING;
 static int        c_miss     = 0;
 static uint8_t    c_req_seq  = 0;
 static uint32_t   c_last_req = 0;
-static uint32_t   c_last_rx  = 0;   // timestamp of last received packet in LORA_LINK
+static uint32_t   c_last_rx   = 0;   // timestamp of last received packet in LORA_LINK
+static uint32_t   c_seek_reinit = 0; // last time radio was reinited while seeking
 
 static void chimp_link_lost() {
     Serial.println("# LINK LOST — returning to SEEK");
-    c_state    = C_SEEKING;
-    c_miss     = 0;
-    c_last_req = 0;
+    c_state       = C_SEEKING;
+    c_miss        = 0;
+    c_last_req    = 0;
+    c_seek_reinit = 0;  // force reinit on first re-entry to SEEKING
 }
 
 #endif  // !CAL_MASTER
@@ -603,6 +605,14 @@ void loop() {
     switch (c_state) {
 
     case C_SEEKING: {
+        // Periodic radio reinit — recovers from degraded state after extended seeking
+        if (millis() - c_seek_reinit > 60000) {
+            Serial.println("# SEEK: radio reinit");
+            radio.begin(CAL_FREQ_MHZ, CAL_BW_KHZ, CAL_SF, 5, 0x12, CAL_TX_DBM);
+            apply_gain();
+            c_seek_reinit = millis();
+        }
+
         // Broadcast CONNECT_REQ every 500 ms; listen for CONNECT_ACK
         if (millis() - c_last_req >= 500) {
             c_last_req = millis();
