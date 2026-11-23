@@ -18,13 +18,24 @@
 #define WDT_TIMEOUT_S 8   // reboot if loop() stalls > 8 s (longest normal path ~1 s)
 
 // ── Pin assignments ───────────────────────────────────────────────────────────
+// HW_EPAPER: Chimp's current physical unit is a LILYGO T3-S3-E-paper V1.0 board,
+// not the plain T3-S3 V1.3 — same SX1280 ranging module, but different PCB
+// routing for DIO1/BUSY, plus a radio power-enable pin the plain V1.3 board
+// doesn't have. Confirmed against LILYGO's published schematics (2026-11-23).
 #define RADIO_NSS    7
-#define RADIO_DIO1   9
 #define RADIO_RST    8
-#define RADIO_BUSY  36
 #define SPI_SCK      5
 #define RADIO_MISO   3
 #define RADIO_MOSI   6
+#ifdef HW_EPAPER
+#define RADIO_DIO1  33
+#define RADIO_BUSY  34
+#define RADIO_POW   35   // must be driven HIGH to power the SX1280 module
+#else
+#define RADIO_DIO1   9
+#define RADIO_BUSY  36
+#define RADIO_POW   -1   // no power-enable pin on plain T3-S3 V1.3
+#endif
 
 // ── RF parameters ─────────────────────────────────────────────────────────────
 #define CAL_FREQ_MHZ  2450.0f
@@ -286,10 +297,21 @@ static void rx_arm() {
 }
 
 // ── Helper: wait for DIO1 with timeout, return true if fired ─────────────────
+// HW_EPAPER: GPIO33 (DIO1 on this board) doesn't reliably trigger the attached
+// interrupt (suspected ESP32-S3 pin conflict, e.g. embedded PSRAM) even though
+// TX and SPI/BUSY-gated commands work fine. Fall back to direct pin polling in
+// addition to the ISR flag so RX-complete is still detected. Confirmed needed
+// 2026-11-23: Alpha heard Chimp's CONNECT_REQ fine (rssi=-49 snr=7) but Chimp
+// never saw Alpha's CONNECT_ACK via isr_fired alone.
 static bool rx_wait(uint32_t timeout_ms) {
     uint32_t t0 = millis();
+#ifdef HW_EPAPER
+    while (!isr_fired && digitalRead(RADIO_DIO1) == LOW && millis() - t0 < timeout_ms) yield();
+    return isr_fired || digitalRead(RADIO_DIO1) == HIGH;
+#else
     while (!isr_fired && millis() - t0 < timeout_ms) yield();
     return isr_fired;
+#endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,6 +434,12 @@ void setup() {
     bme_ok = bme.begin(BME_ADDR, &Wire1);
     if (!bme_ok) bme_ok = bme.begin(0x77, &Wire1);
     Serial.printf("# BME280: %s\n", bme_ok ? "OK" : "NA");
+
+#if RADIO_POW >= 0
+    pinMode(RADIO_POW, OUTPUT);
+    digitalWrite(RADIO_POW, HIGH);
+    delay(10);   // let SX1280 module power rail stabilize before SPI/radio.begin()
+#endif
 
     SPI.begin(SPI_SCK, RADIO_MISO, RADIO_MOSI, RADIO_NSS);
 
